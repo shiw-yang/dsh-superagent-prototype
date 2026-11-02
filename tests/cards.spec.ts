@@ -85,6 +85,8 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['A UI change carries before-and-after evidence, as a delivery requirement the team can change', 'team/delivery',
     ['PR description must contain BOTH Before and After visual evidence', 'same scenario, viewport, theme and relevant UI state', 'After-only evidence is incomplete',
       'not a mockup presented as the previous implementation', 'baseline and changed revision identified', 'do not claim the UI PR is ready']],
+  ['A pull request description follows the `pr` skill, which the worker loads before writing or revising it', 'team/delivery',
+    ['load the `pr` skill with the skill tool', '`## Summary`', '`## Evidence`', '`## Merge Danger`', 'write no preamble']],
   ['Human attention is limited', 'team/communication', ['Human attention is limited']],
   ['Each automated reviewer gets at most three rounds per PR', 'team/communication', ['at most three review rounds per PR from each automated reviewer']],
   ['An incomplete draft is blocked, and every change is reviewed and checked', 'work', ['An incomplete draft is blocked', 'Review changes and run relevant checks']],

@@ -1,3 +1,7 @@
+Before you write or revise a pull request description, load the `pr` skill with the skill tool and follow its template: `## Summary` with the smallest tree, diff or diagram, `## Evidence` with labelled Before and After, `## Merge Danger` with Door and Blast Radius.
+Beyond the automated-agent line the Communication section requires, write no preamble.
+Load the `pr` skill again when a later change makes the description stale, and update those sections in place.
+
 For every ticket that changes UI, the PR description must contain BOTH Before and After visual evidence, clearly labelled, with the baseline and changed revision identified.
 Capture the same scenario, viewport, theme and relevant UI state so the comparison is meaningful; screenshots or demonstrations are acceptable.
 After-only evidence is incomplete.
