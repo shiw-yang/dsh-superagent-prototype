@@ -18,6 +18,8 @@ Each open Ticket has one stage, determined by what it is waiting for. Read the t
 
 A `person` stage means the Ticket cannot continue without human input. A new human message releases a `blocked` or `failed` Ticket to its Executor, so it moves to the next matching stage, usually `working`.
 
+A new message from a person that reaches the Ticket, by fan-out on one of its own Threads or by attachment, clears an open Attention: the person answered the question or superseded it, so the Ticket leaves `person / answer`, and an unsent question is withdrawn. A bot's or CI's message, and one read on a Thread the Ticket follows only for context, is no answer.
+
 An `idle` Ticket has finished its turn without an outstanding question. A Trigger on a subscribed Thread can continue it.
 
 ## The Executor

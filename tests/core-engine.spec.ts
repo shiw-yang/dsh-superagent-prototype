@@ -895,6 +895,48 @@ describe('attach', () => {
     expect(new UserError('notAdmissible', { reason: 'not_a_member' })).toMatchObject({ code: 'notAdmissible', values: { reason: 'not_a_member' }, message: 'Trigger is not admissible: not_a_member' })
   })
 })
+describe('attention', () => {
+  /** Record the worker's question for a person, asked from the ticket's message 1, and return it. */
+  const ask = (h: ReturnType<typeof harness>, ticketId: string) =>
+    h.engine.report(ticketId, { state: 'progress', summary: 'need a decision', question: 'Which color?', askedBy: '1' }).attention!
+  it('clears the question a person answers on the ticket\'s thread, and withdraws the unsent question, but not for a bot\'s message or one read only for context', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    const attention = ask(h, ticketId)
+    h.engine.reply({ purpose: 'attention', ticketId, question: 'Which color?', text: 'Which color?' })
+    // A bot's message on the thread asks for no answer.
+    h.engine.receive(trigger('2', { human: false }))
+    expect(h.repo.tickets.get(ticketId)!.attention).toEqual(attention)
+    // A message on a Thread the ticket follows only for context is none of its answers either.
+    h.engine.followForContext(ticketId, { source: 'chat', id: 'ctx' })
+    h.engine.receive(trigger('3', { threads: [{ source: 'chat', id: 'ctx' }] }))
+    expect(h.repo.tickets.get(ticketId)!.attention).toEqual(attention)
+    // A person's message on the ticket's thread answers it: the question is gone and its unsent message withdrawn.
+    h.engine.receive(trigger('4'))
+    const answered = h.repo.tickets.get(ticketId)!
+    expect(answered).not.toHaveProperty('attention')
+    expect(h.withdrawn).toEqual([key('attention-reply', attention.id)])
+    expect(ticketStage(answered)).toEqual({ stage: 'working' })
+    // The orchestrator can no longer send a stale question for it.
+    expect(() => h.engine.reply({ purpose: 'attention', ticketId, question: 'Which color?', text: 'Which color?' })).toThrow(new UserError('notAttention'))
+  })
+  it('clears the question when the person\'s message is attached from a thread the ticket did not follow, but not for a bot\'s', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    const attention = ask(h, ticketId)
+    const elsewhere = (id: string, overrides: Partial<Trigger> = {}) => trigger(id, { threads: [{ source: 'chat', id: `elsewhere-${id}` }], ...overrides })
+    // The message reaches no ticket on its own; attaching it to the waiting ticket delivers the answer.
+    h.engine.receive(elsewhere('2'))
+    expect(h.engine.attach(ticketId, '2').attention).toBeUndefined()
+    // A bot's message attached there is no answer: the question stays.
+    h.tick(1)
+    const again = ask(h, ticketId)
+    h.engine.receive(elsewhere('3', { human: false }))
+    expect(h.engine.attach(ticketId, '3').attention).toEqual(again)
+    expect(h.repo.tickets.get(ticketId)!.attention!.id).toBe(again.id)
+    expect(attention.id).not.toBe(again.id)
+  })
+})
 describe('direct decisions', () => {
   it('decides an explicit request no Eval holds in a direct Eval, refuses a proactive accept without matched rules, and accepts a Trigger once', () => {
     const h = harness()

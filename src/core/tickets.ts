@@ -229,10 +229,16 @@ export class Tickets extends EnginePart {
   }
   /**
    * Add an Input once (idempotently) and ask the Executor to deliver it, or to launch again a pending Assignment whose launch
-   * failed once no person is waited for: a Policy change alone does not launch it again.
+   * failed once no person is waited for: a Policy change alone does not launch it again. A person's message that reaches the
+   * ticket, by fan-out on one of its own Threads or by attachment, answers the question it waits on or supersedes it, so its
+   * Attention is cleared with any unsent question; a bot's or CI's message, and one read only for context, is no answer.
    */
   addInput(ticket: Ticket, input: TicketInput): void {
     if (ticket.inputs.some(existing => existing.id === input.id)) return
+    if (input.kind === 'trigger' && input.human && !input.context && ticket.attention) {
+      this.replies.withdrawAttention(ticket.attention.id)
+      delete ticket.attention
+    }
     ticket.inputs.push(input); ticket.updatedAt = this.now()
     // Hold back automated inputs while the worker is waiting on a person.
     const held = liveTicket(ticket) && automatic(input) && waitsForPerson(ticket)

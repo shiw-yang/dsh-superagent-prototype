@@ -442,6 +442,27 @@ it('attaches an event to an existing open task through orchestrator_route', asyn
   expect(relays(sessionId)[0]).toMatchObject({ trigger_id: other.id, text: '@bot 顺手把这里也改了', routing_note: '同一个页面' })
 })
 
+it('clears a ticket\'s question for a person when their message answers it, by attachment or on its thread, but not for a bot\'s', async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'need a decision', human_action: '按钮用哪种颜色？' })
+  expect(await runTool(runtime.masterId, 'orchestrator_reply', { ticket_id: ticket.id, purpose: 'attention', human_action: '按钮用哪种颜色？', text: '按钮用哪种颜色？' })).toEqual({ status: 'sent' })
+  const stored = () => runtime.store.tickets.get(ticket.id)!
+  expect(stored().attention).toBeDefined()
+  // The person answers on a thread the ticket does not follow yet; the main Session attaches the message to the ticket.
+  const answer = feishu('30', '用蓝色', { mentions: [], root_id: undefined })
+  await receive(answer)
+  expect(await route({ kind: 'attach', ticket_id: ticket.id, trigger_id: answer.id }))
+    .toMatchObject({ ticket: { ticket_id: ticket.id, state: 'working' } })
+  expect(stored().attention).toBeUndefined()
+  expect(ticketList(viewsOf(runtime), 'person', 0, 20).items.map(item => item.id)).not.toContain(ticket.id)
+  // A bot's message on the ticket's thread leaves a new question open; a person's message there answers it.
+  await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'still need a decision', human_action: '要不要也改桌面端？' })
+  await receive(feishu('31', 'CI 失败了', { mentions: [], root_id: 'om_1', sender_id: 'ou_ci_bot', sender_type: 'bot' }))
+  expect(stored().attention).toMatchObject({ question: '要不要也改桌面端？' })
+  await receive(feishu('32', '要', { mentions: [], root_id: 'om_1' }))
+  expect(stored().attention).toBeUndefined()
+})
+
 it('acknowledges a follow-up from the worker once and rejects events outside the task', async () => {
   const { sessionId, ticket } = await acceptedTicket()
   const followup = feishu('10', '还有这个', { mentions: [], root_id: 'om_1' })

@@ -283,7 +283,7 @@ export interface Ticket {
   channels: ChannelRef[]
   /** When, by whom, and how the ticket ended, with a person's or the host's reason beyond the outcome; an open ticket has none. */
   ended?: { at: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
-  /** Open question for a person; cleared by the executor or when the ticket ends. */
+  /** Open question for a person; cleared by the executor, by a person's message that reaches the ticket, or when the ticket ends. */
   attention?: Attention
   assignments: Assignment[]
   inputs: TicketInput[]
