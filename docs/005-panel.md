@@ -16,7 +16,7 @@ The tabs follow the workflow: **Overview**, **Source**, **Trigger**, **Eval**, *
 
 | Tab | Shows |
 | --- | --- |
-| Overview | Tickets needing action, system problems, activity counts for the last 24 hours, and Executor load. Each block links to its detailed page |
+| Overview | Tickets needing action, system problems, activity counts for the last 24 hours, and one box per Executor with its stage and latest report. Each block links to its detailed page |
 | Source | Source state, setup problems and non-zero counts. Filtered Triggers and dropped messages cover the same 24-hour window as Overview |
 | Trigger | Threads filtered by Subscribed, Evaluating, New Triggers in 24 h, or All Threads. Each Thread shows its Triggers newest first, Decisions and Subscriptions |
 | Eval | Decisions with their reason and matched rules |

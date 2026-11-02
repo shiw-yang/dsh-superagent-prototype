@@ -3,7 +3,7 @@
 import { expect, it } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
 import { usePanel, mount, remount, all, find, tab, click, text } from './fixtures/panel.tsx'
-import { server, droppedReply, threadSummary } from './fixtures/panel-server.ts'
+import { server, droppedReply, threadSummary, ticketSummary } from './fixtures/panel-server.ts'
 
 usePanel()
 it('leads the overview with the pending Tickets, then problems, the last day and the Executor, each linking to its stage', async () => {
@@ -24,6 +24,32 @@ it('leads the overview with the pending Tickets, then problems, the last day and
   expect(document.querySelector<HTMLAnchorElement>('a.dt-chip-link')?.href).toBe('https://github.com/acme/widgets/pull/42')
   await click(all('.dt-more-link').at(-1)!)
   expect(tab(zh['tab.execution']).getAttribute('aria-selected')).toBe('true')
+})
+
+it('boards each open Executor as a small box with its stage, Ticket, latest report and order of work', async () => {
+  server.tickets.open = [
+    ticketSummary({ id: 't5', title: '等待触发的工单', summary: '上一轮已改完', updatedAt: '2026-09-23T00:00:00Z' }, { stage: 'idle' }),
+    ticketSummary({ id: 't6', title: '排队中的工单', summary: '', updatedAt: '2026-09-23T02:00:00Z' },
+      { stage: 'working', action: 'queued' }),
+    ticketSummary({ id: 't1', title: '修复回归', summary: '正在修改登录表单', undelivered: 2, updatedAt: '2026-09-23T01:00:00Z' }),
+    ticketSummary({ id: 't7', title: '待回答的工单' }, { stage: 'person', action: 'answer' }),
+  ]
+  await mount()
+  // The boxes reuse the open-Ticket page the Execution tab already reads; no new host API.
+  expect(server.requests.some(request => request.path === 'tickets?state=open&limit=100')).toBe(true)
+  // The running count leads the usual stats line above the boxes; queued and waiting follow it.
+  expect(all('.dt-executor-load .dt-stat').map(stat => stat.textContent)).toEqual(['执行中2 / 3', '排队0', '等待新触发1'])
+  expect(all('.dt-executor-card').map(card => [card.querySelector('.dt-executor-head .dt-stage')?.textContent,
+    card.querySelector('.dt-open')?.textContent, card.querySelector('.dt-executor-progress')?.textContent,
+    card.querySelector('.dt-executor-foot')?.textContent])).toEqual([
+    ['执行中', '修复回归', '正在修改登录表单', 'GitHub未送达 2'],
+    ['排队中', '排队中的工单', zh.executorBoardNoReport, 'GitHub'],
+    ['等待新触发', '等待触发的工单', '上一轮已改完', 'GitHub'],
+  ])
+  // Work waiting on a person has its own section above, so no box here.
+  expect(text()).not.toContain('待回答的工单')
+  await click(document.querySelector<HTMLElement>('.dt-executor-card .dt-open')!)
+  expect(document.querySelector('.dt-page-title h2')?.textContent).toBe('修复回归')
 })
 
 it('re-evaluates or dismisses an unjudged Eval from the problem list', async () => {

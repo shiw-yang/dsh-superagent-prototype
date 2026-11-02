@@ -1,12 +1,13 @@
-/** Overview page: pending Tickets requiring human action, active system problems, 24-hour flow counts, and Executor load. */
+/** Overview page: pending Tickets requiring human action, active system problems, 24-hour flow counts, and one box per Executor. */
 import type { ReactNode } from 'react'
-import { usePoll, type Problem } from './api.ts'
-import { Button, Icon } from './controls.tsx'
+import { usePoll, type Problem, type TicketRow } from './api.ts'
+import { Button, Icon, Tag } from './controls.tsx'
+import { ticketMark } from './marks.ts'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { setupPage, settingsRoute, type Route } from './route.ts'
 import { TicketLine } from './rows.tsx'
 import { healthText, localized, reasonLabel, valueLabel, readableMarkers } from './text.ts'
-import { CheckSetupButton, ConfirmButton, Hint, LoadState, Section, SetupMessage } from './widgets.tsx'
+import { CheckSetupButton, ConfirmButton, Hint, LabelValue, LoadState, Section, SetupMessage, StageMark, When } from './widgets.tsx'
 
 function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () => Promise<void> }) {
   const { t, call, navigate } = usePanel()
@@ -58,11 +59,47 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
   }
 }
 
+/**
+ * One compact box per Executor that is working or waiting (a Ticket's worker Session): its stage, Ticket, latest report
+ * and related facts. The whole box opens its Ticket.
+ */
+function ExecutorCard({ ticket }: { ticket: TicketRow }) {
+  const { t, navigate } = usePanel()
+  const mark = ticketMark(t, ticket)
+  const progress = readableMarkers(t, ticket.summary)
+  const thread = ticket.threads[0]
+  return <li className="dt-executor-card" data-state={mark.dot}>
+    <div className="dt-executor-head">
+      <StageMark state={mark.dot} icon={mark.icon} label={mark.label} />
+      <When at={ticket.updatedAt} />
+    </div>
+    <div className="dt-row-title"><button type="button" className="dt-open" title={ticket.title}
+      onClick={() => navigate({ page: 'execution', id: ticket.id })}>{ticket.title}</button></div>
+    <p className="dt-executor-progress">{progress || t('executorBoardNoReport')}</p>
+    <div className="dt-executor-foot">
+      {thread && <Tag tone="quiet">{valueLabel(t, 'source', thread.source)}</Tag>}
+      {ticket.undelivered > 0 && <LabelValue label={t('ticketUndeliveredLabel')} value={ticket.undelivered} />}
+    </div>
+  </li>
+}
+/**
+ * The Executors to box on the overview: working Tickets first, then queued ones, then those waiting for a Trigger, each
+ * newest first. Tickets waiting on a person have their own section above and no place here.
+ */
+export function executorCards(tickets: TicketRow[]): TicketRow[] {
+  const rank = (ticket: TicketRow) => ticket.stage === 'idle' ? 2 : ticket.stage === 'working' && ticket.action === 'queued' ? 1 : 0
+  return tickets.filter(ticket => ticket.stage === 'working' || ticket.stage === 'idle')
+    .sort((a, b) => rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt))
+}
+
 export function OverviewPage() {
   const { t, call, navigate } = usePanel()
   const { setup } = usePanelData()
   const { data, error, reload } = usePoll(() => call('GET overview'), [])
+  // One page is enough for far more Executors than the configured concurrency, including the waiting queue.
+  const board = usePoll(() => call('GET tickets', { query: { state: 'open', limit: 100 } }), [])
   if (!data) return <LoadState error={error} loading />
+  const executors = board.data ? executorCards(board.data.items) : []
   const stat = (label: string, value: ReactNode, route?: Route) => <span className="dt-stat">
     <span className="dt-stat-label">{label}</span>
     {route ? <button type="button" className="dt-textlink dt-stat-value" onClick={() => navigate(route)}>{value}</button> : <span
@@ -91,13 +128,18 @@ export function OverviewPage() {
         {data.flow.dropped > 0 && stat(t('flowDroppedLabel'), data.flow.dropped, { page: 'source' })}
       </div>
     </Section>
-    <Section title={t('term.executor')} action={more({ page: 'execution' })}>
+    <Section title={t('term.executor')} action={more({ page: 'execution' })} hint={t('executorBoardHint')}>
       {/* Pauses surface in `problems` above, so Executor counts render the same in both states; while setup waits, nothing runs. */}
-      {setup?.problem ? <Hint>{t('executorWaitingSetup')}</Hint> : <div className="dt-stats">
-        {stat(t('executingLabel'), `${data.executor.running} / ${data.executor.maxWorkers}`)}
-        {stat(t('queuedLabel'), data.executor.queued)}
-        {stat(t('idleLabel'), data.executor.idle)}
-      </div>}
+      {setup?.problem ? <Hint>{t('executorWaitingSetup')}</Hint> : <>
+        <div className="dt-stats dt-executor-load">
+          {stat(t('executingLabel'), `${data.executor.running} / ${data.executor.maxWorkers}`)}
+          {stat(t('queuedLabel'), data.executor.queued)}
+          {stat(t('idleLabel'), data.executor.idle)}
+        </div>
+        {board.error && <LoadState error={board.error} loading={false} />}
+        {board.data && (executors.length ? <ul className="dt-executor-grid">{executors.map(ticket => <ExecutorCard key={ticket.id}
+          ticket={ticket} />)}</ul> : <Hint>{t('none')}</Hint>)}
+      </>}
     </Section>
   </>
 }
