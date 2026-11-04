@@ -1,5 +1,5 @@
 /**
- * Migrates a schema 10 database to schema 11 in a single transaction so runtime readers never convert legacy shapes.
+ * Migrates schema 10 through 11 to 12 in a single transaction so runtime readers never convert legacy shapes.
  * Databases older than schema 10 are rejected: this version cannot migrate them.
  */
 import { basename } from 'node:path'
@@ -17,7 +17,38 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
+/** Add managed topology without rewriting historical snapshots or guessing ticket provenance. */
+export function migrateTo12(store: Store): void {
+  const settings = store.settings()
+  const source = settings.sources.github
+  const fullName = source?.config.repository
+  if (!source || Object.keys(settings.repositories).length || typeof fullName !== 'string' || !/^[^\s/]+\/[^\s/]+$/.test(fullName)
+    || typeof source.config.cli !== 'string' || !source.config.cli.trim()) return
+  const { maxWorkers, ...executor } = settings.executor
+  const next = { ...settings,
+    repositories: { default: { name: fullName, provider: 'github' as const, fullName, accessProfileId: 'default', executorProfileId: 'default', enabled: true } },
+    executorProfiles: { default: { name: 'Default', ...executor } },
+    accessProfiles: { default: { name: 'Default', kind: 'github-cli' as const, cli: source.config.cli } },
+    scheduler: { maxWorkers }, sources: { ...settings.sources,
+      ...(settings.sources.feishu && !settings.sources.feishu.routing ? { feishu: { ...settings.sources.feishu, routing: { defaultRepositoryId: 'default', allowedRepositoryIds: ['default'] } } } : {}),
+      github: { ...source, kind: 'github', repositoryId: 'default' } } }
+  store.saveSettings(next)
+  for (const row of store.db.prepare('SELECT value FROM ticket').all()) {
+    const ticket = JSON.parse(String(row.value)) as Ticket
+    if (ticket.repository) continue
+    const origins = ticket.origin.triggerIds.map(id => store.triggers.get(id))
+    // Source IDs alone are insufficient: an old source may have been reconfigured to another repository.
+    const identifiesTarget = (trigger: (typeof origins)[number]): boolean => {
+      if (!trigger || trigger.source !== 'github' || !trigger.url) return false
+      try { const url = new URL(trigger.url); return url.hostname === 'github.com' && url.pathname.split('/').slice(1, 3).join('/').toLowerCase() === fullName.toLowerCase() }
+      catch { return false }
+    }
+    if (!origins.length || !origins.every(identifiesTarget)) continue
+    store.tickets.save({ ...ticket, repository: 'default', mandate: { ...ticket.mandate, repository: 'default' },
+      routing: { sourceInstanceId: 'github', basis: 'source' } })
+  }
+}
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */

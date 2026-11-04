@@ -10,7 +10,7 @@ const entries = ['README.md', 'SETUP.md']
 const documents = [...entries, ...readdirSync(join(ROOT, 'docs')).filter(name => name.endsWith('.md')).map(name => `docs/${name}`)]
 const read = (path: string): string => readFileSync(join(ROOT, path), 'utf8')
 function links(file: string): string[] {
-  return [...readFileSync(file, 'utf8').matchAll(/\]\(([^)\s]+)\)/g)].map(match => match[1]!.split('#')[0]!).filter(target => target && !/^[a-z]+:/.test(target))
+  return [...readFileSync(file, 'utf8').matchAll(/\]\(([^)\s]+)\)/g)].map(match => match[1]!.replace(/^<|>$/g, '').split('#')[0]!).filter(target => target && !/^[a-z]+:/.test(target))
 }
 const files = (directory: string): string[] => readdirSync(join(ROOT, directory), { recursive: true, withFileTypes: true })
   .filter(entry => entry.isFile()).map(entry => relative(ROOT, join(entry.parentPath, entry.name)))

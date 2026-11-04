@@ -9,6 +9,7 @@ import { usePanel } from './provider.tsx'
 import { TicketLine } from './rows.tsx'
 import { ConfigHistory, Field, Fields, ModelField, numberOf, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { localized } from './text.ts'
+import { TopologySettings } from './topology.tsx'
 import { ConfirmButton, Hint, LabelValue, LoadMore, LoadState, Section, StatusHead } from './widgets.tsx'
 
 export function ExecutionStatus({ filter: current, state, reload }: {
@@ -90,6 +91,7 @@ export function ExecutionSettings() {
     requestAnimationFrame(() => { field?.focus(); const caret = at + key.length + 3; field?.setSelectionRange(caret, caret) })
   }
   return <div className="dt-form">
+    <TopologySettings />
     <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
       <Fields disabled={draft.busy}>
         <div className="dt-form dt-block">

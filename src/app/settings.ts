@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { UserError, type EngineForSettings } from '../core/index.ts'
-import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
+import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, SourceInstanceSchema, TopologySchema, topologyOf, policyEffects, policyVersion } from '../policy.ts'
 import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, SettingsSave } from '../policy.ts'
 import type { SourceHost } from '../sources/host.ts'
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
@@ -29,7 +29,25 @@ interface Block {
   merge(settings: SettingsValue, value: unknown, id: string): SettingsValue
   guard?(current: SettingsValue, candidate: SettingsValue, origin: SettingsOrigin): void
 }
-const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
+const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source' | 'topology', Block> = {
+  topology: {
+    parse: (value, sources) => {
+      const topology = TopologySchema.parse(value)
+      for (const [id, source] of Object.entries(topology.sources)) {
+        const kind = sources.kind(source.kind ?? id)
+        if (!kind) { if (source.enabled) throw new UserError('sourceNotInstalled', { source: id }); continue }
+        source.config = kind.schema.parse(source.config)
+      }
+      return topology
+    },
+    merge: (settings, value) => {
+      const topology = value as ReturnType<typeof topologyOf>
+      const profile = topology.sources.github?.repositoryId === 'default' && topology.executorProfiles.default
+      const { name: _name, ...executor } = profile || { name: '' }
+      return { ...settings, ...topology, ...(profile ? { executor: { ...settings.executor, ...executor, maxWorkers: topology.scheduler.maxWorkers } } : {}) }
+    },
+    guard: (current, candidate, origin) => { if (origin !== 'panel' && JSON.stringify(topologyOf(current)) !== JSON.stringify(topologyOf(candidate))) throw new UserError('panelOnlyEnvironment') },
+  },
   policy: {
     parse: (value, sources) => {
       const policy = PolicyConfigSchema.parse(value)
@@ -40,15 +58,33 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
   eval: { parse: value => EvalConfigSchema.parse(value), merge: (settings, value) => ({ ...settings, eval: value as SettingsValue['eval'] }) },
   executor: {
     parse: value => ExecutorConfigSchema.parse(value),
-    merge: (settings, value) => ({ ...settings, executor: value as SettingsValue['executor'] }),
+    merge: (settings, value) => {
+      const executor = value as SettingsValue['executor'], { maxWorkers, ...profile } = executor
+      const legacy = settings.sources.github?.repositoryId === 'default' && settings.executorProfiles.default
+      return { ...settings, executor, ...(legacy ? { executorProfiles: { ...settings.executorProfiles, default: { ...legacy, ...profile } }, scheduler: { ...settings.scheduler, maxWorkers } } : {}) }
+    },
     // Only the management panel may modify shell execution paths or commands.
     guard: (current, candidate, origin) => { if (origin !== 'panel' && environment(current) !== environment(candidate)) throw new UserError('panelOnlyEnvironment') },
   },
   source: {
-    parse: (value, sources, id) => sources.validate(id, z.object({ enabled: z.boolean(), config: z.unknown() }).parse(value)),
-    merge: (settings, value, id) => ({ ...settings, sources: { ...settings.sources, [id]: value as SettingsValue['sources'][string] } }),
+    parse: (value, sources, id) => { const parsed = SourceInstanceSchema.parse(value); return { ...parsed, ...sources.validate(id, parsed) } },
+    merge: (settings, value, id) => {
+      const source = { ...settings.sources[id], ...value as SettingsValue['sources'][string] }
+      const repository = source.repositoryId && settings.repositories[source.repositoryId]
+      if (repository && (source.kind ?? id) === 'github') {
+        const access = settings.accessProfiles[repository.accessProfileId]
+        // Managed identity lives only in topology; legacy editor submissions cannot create shadow bindings.
+        const old = settings.sources[id]?.config
+        if ((source.config.repository !== old?.repository && source.config.repository !== repository.fullName)
+          || (source.config.cli !== old?.cli && source.config.cli !== access?.cli)) throw new Error('Manage repository and account bindings in topology')
+      }
+      return { ...settings, sources: { ...settings.sources, [id]: source } }
+    },
     // Only the management panel may switch source accounts.
-    guard: (current, candidate, origin) => { if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
+    guard: (current, candidate, origin) => {
+      const bindings = (settings: SettingsValue) => JSON.stringify(Object.entries(settings.sources).map(([id, source]) => [id, source.kind, source.repositoryId, source.routing]))
+      if (origin !== 'panel' && (setupChanged(current, candidate) || bindings(current) !== bindings(candidate))) throw new UserError('panelOnlyAccounts')
+    },
   },
 }
 
@@ -117,6 +153,7 @@ export class Settings {
       pause: { revision: revision('pause'), value: { paused: settings.paused } },
       eval: { revision: revision('eval'), value: settings.eval },
       executor: { revision: revision('executor'), value: settings.executor },
+      topology: { revision: revision('topology'), value: topologyOf(settings) },
       policy: { revision: revision('policy'), rules: rules.map(rule => ({ id: rule.id, name: rule.name, enabled: rule.enabled })),
         allowed: Object.fromEntries(Object.entries(parts).map(([id, part]) => [id, part.allowed.length])), read: 'settings/policy' },
       sources: sources.instances(settings).map(({ id, kind, enabled, installed }) =>
@@ -131,8 +168,8 @@ export class Settings {
     const { store, sources } = this.host
     const settings = store.settings(), id = block.startsWith('source:') ? block.slice('source:'.length) : undefined
     const instance = id === undefined ? undefined : sources.instances(settings).find(item => item.id === id)
-    const value = block === 'pause' ? { paused: settings.paused } : block === 'policy' || block === 'eval' || block === 'executor' ? settings[block]
-      : instance ? { enabled: instance.enabled, config: instance.config } : undefined
+    const value = block === 'topology' ? topologyOf(settings) : block === 'pause' ? { paused: settings.paused } : block === 'policy' || block === 'eval' || block === 'executor' ? settings[block]
+      : instance ? { ...settings.sources[id!], enabled: instance.enabled, config: instance.config } : undefined
     if (value === undefined) throw new UserError('unknownBlock', { block })
     return { block, revision: store.blockRevision(block as SettingsSave), value }
   }
@@ -157,6 +194,35 @@ export class Settings {
     const parsed = rules.parse(value, sources, id)
     const current = store.settings()
     const candidate = rules.merge(current, parsed, id)
+    rules.guard?.(current, candidate, origin)
+    if (kind === 'topology' || kind === 'source') {
+      TopologySchema.parse(topologyOf(candidate))
+      for (const [sourceId, before] of Object.entries(current.sources)) {
+        const after = candidate.sources[sourceId]
+        if (!after || (before.repositoryId && after.repositoryId !== before.repositoryId) || (after.kind ?? sourceId) !== (before.kind ?? sourceId)) throw new Error('An existing source cannot be deleted or rebound; disable it and create a new source ID')
+      }
+    }
+    const validateHistory = () => {
+      if (kind !== 'topology') return
+      for (const [repositoryId, before] of Object.entries(current.repositories)) {
+        const after = candidate.repositories[repositoryId]
+        if (!after || after.fullName !== before.fullName || after.provider !== before.provider) throw new Error('An existing repository cannot be deleted or retargeted; disable it and create a new repository ID')
+      }
+      for (const ticket of store.tickets.list()) {
+        if (!ticket.repository) continue
+        const before = current.repositories[ticket.repository], after = candidate.repositories[ticket.repository]
+        if (!after || (before && after.fullName !== before.fullName)) throw new Error('A repository referenced by ticket history cannot be deleted or retargeted; disable it instead')
+        const plan = ticket.execution?.plan
+        for (const profile of [plan?.accessProfileId, before?.accessProfileId].filter((id): id is string => !!id)) if (!candidate.accessProfiles[profile]) throw new Error('Access profile is referenced by ticket history')
+        for (const profile of [plan?.executorProfileId, before?.executorProfileId].filter((id): id is string => !!id)) if (!candidate.executorProfiles[profile]) throw new Error('Executor profile is referenced by ticket history')
+      }
+    }
+    validateHistory()
+    if (kind === 'topology') {
+      for (const [profileId, profile] of Object.entries(candidate.executorProfiles)) {
+        if (profile.model && JSON.stringify(profile.model) !== JSON.stringify(current.executorProfiles[profileId]?.model)) await resolveRoleModel(this.host.context, profile.model)
+      }
+    }
     const model = block === 'eval' ? candidate.eval.model : block === 'executor' ? candidate.executor.model : null
     const previous = block === 'eval' ? current.eval.model : block === 'executor' ? current.executor.model : null
     if (model && JSON.stringify(model) !== JSON.stringify(previous)) {
@@ -169,6 +235,7 @@ export class Settings {
     // Re-read current settings after async checks in case unrelated blocks were saved concurrently.
     const old = store.settings()
     const settings = rules.merge(old, parsed, id)
+    validateHistory()
     if (JSON.stringify(SettingsSchema.parse(settings)) === JSON.stringify(old)) {
       const delivery = await sessions.delivery(`settings:${block}`)
       return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false, context_delivery: delivery }
@@ -187,7 +254,8 @@ export class Settings {
     // Rewrite worker command shims immediately when `blockedCommands` changes.
     const blocked = settings.executor.blockedCommands
     const changed = blocked.join(' ') !== old.executor.blockedCommands.join(' ')
-    if (changed) await this.host.setup.blockCommands(blocked)
+    // Managed workers pin command policy: restart must stop their processes before rewriting shared shims.
+    if (changed && !Object.keys(settings.repositories).length) await this.host.setup.blockCommands(blocked)
     // When restarting, the notice stays pending until after the restart; `setup.restart()` defers until this call returns.
     const delivery = restarting ? 'pending' : await sessions.delivery(`settings:${block}`)
     if (restarting) this.host.setup.restart()

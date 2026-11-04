@@ -1,4 +1,5 @@
 /** Lifecycle, prompt/tool/skill decoration, message delivery, and budget retry tracking for orchestrator and worker DSH sessions. */
+import { repositoryExecutionProblem, workerEnvironmentProblem } from '../executor/plan.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
@@ -34,6 +35,7 @@ export interface SessionsHost {
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
+  executionProblem?(ticket: Ticket): string | undefined
   /** Tools to register on the main Session (`ticket === undefined`) or on `ticket`'s worker Session. */
   tools(agent: Agent, ticket?: Ticket): Tool[]
 }
@@ -105,7 +107,7 @@ export class Sessions {
     host.effects.handle('notice', ({ value, summary }, name) => this.inject(name, value, summary), { ordered: true })
   }
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
-  install(): void {
+  async install(): Promise<void> {
     const ctx = this.ctx
     ctx.on('agent/disposed', ({ agent }) => {
       this.release(agent)
@@ -133,6 +135,11 @@ export class Sessions {
     ctx.on('agent/status', ({ agent, status }) => {
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
     })
+    // Plugin restarts retain Agent objects, but dispose removed this plugin's tool guards.
+    // Restore those before setup/launch authorization, including disabled workers and their children.
+    const registry = ctx.agents as unknown as { list?: () => Agent[]; values?: () => Iterable<Agent> }
+    const loaded = registry.list?.() ?? [...registry.values?.() ?? []]
+    await Promise.all(loaded.map(agent => this.decorate(agent)))
   }
   /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
   async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
@@ -147,7 +154,9 @@ export class Sessions {
     }
     if ('error' in result) throw result.error
     const settings = this.host.store.settings()
-    await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
+    const ticket = role === 'worker' ? this.ticketOf(result.agent) : undefined
+    await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model
+      : ticket?.execution?.plan ? ticket.execution.plan.model : settings.executor.model)
     await this.decorate(result.agent)
     ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
@@ -163,7 +172,16 @@ export class Sessions {
     accepted?: () => void): Promise<void> {
     const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
     if ('error' in result) throw result.error
-    await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, authorize, accepted)
+    const checked = () => {
+      authorize?.()
+      if (typeof mode !== 'string') return
+      const ticket = this.ticketOf(result.agent)
+      if (!ticket) return
+      const problem = repositoryExecutionProblem(this.host.store.settings(), ticket)
+        ?? (this.host.executionProblem ? this.host.executionProblem(ticket) : workerEnvironmentProblem(this.host.store.settings(), ticket))
+      if (problem) throw new Error(problem)
+    }
+    await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, checked, accepted)
   }
   /** The id of the message `prompt` delivers under `requestId`, which DSH's inbox events name it by. */
   promptedId(requestId: string): MessageId { return messageId(key(requestId)) }
@@ -237,6 +255,8 @@ export class Sessions {
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
+    // Install the worker guard synchronously, before skill registration can yield or fail.
+    if (ticket) binding.disposers.push(...this.workOnly(agent, ticket.id))
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()
@@ -262,9 +282,6 @@ export class Sessions {
     if (master) {
       binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
-    } else {
-      // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
-      binding.disposers.push(...this.workOnly(agent, ticket!.id))
     }
   }
   /**
@@ -292,7 +309,9 @@ export class Sessions {
     const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
     return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
       const current = store.tickets.get(ticketId)
-      return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined
+      return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket'
+        : repositoryExecutionProblem(store.settings(), current)
+          ?? (this.host.executionProblem ? this.host.executionProblem(current) : workerEnvironmentProblem(store.settings(), current))
     })]
   }
   /**

@@ -3,6 +3,7 @@
  * Who may originate work is configured per Source in that Source's own identities; the Policy never maps a person across Sources.
  */
 import { LIMITS } from './limits.ts'
+import { resolveTarget, repositoryAllowed } from './repositories.ts'
 import { z } from 'zod'
 import { ADMISSION_DEFAULTS, type Admission, type AdmissionCell, type AdmissionRow } from './admission.ts'
 import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffect, type SourceScope, type Strength, type Thread, type Ticket,
@@ -29,7 +30,7 @@ export function directionAllowed(value: unknown): value is AdmissionDirection {
 }
 export interface Assessment {
   decision: 'accept' | 'ignore' | 'unavailable'; rule_assessments: RuleAssessment[]; direction: unknown
-  title: string; scope: string; reason: string; intent_evidence?: string | null; acknowledgement?: string | null; worktree_name?: string
+  title: string; scope: string; reason: string; repository?: string; intent_evidence?: string | null; acknowledgement?: string | null; worktree_name?: string
 }
 /**
  * Validate an assessment against enabled rules and convert it into an engine `AssessmentOutcome`.
@@ -57,7 +58,7 @@ export function assessmentOutcome(assessment: Assessment, settings: Pick<Setting
     return { kind: 'ignore', audit: { ...audit, would_accept: true, proposal }, reason: { code: 'observed', values: { text: assessment.reason } } }
   }
   return { kind: 'accept', title, scope, reason: assessment.reason, ...(assessment.acknowledgement ? { acknowledgement: assessment.acknowledgement } : {}),
-    rules: matches.map(match => match.rule_id), audit, ...(name ? { name } : {}) }
+    rules: matches.map(match => match.rule_id), audit, ...(name ? { name } : {}), ...(assessment.repository ? { repository: assessment.repository } : {}) }
 }
 const DEFAULT_RULES = [
   { id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Explicit requests to correct a typo, wording, punctuation or existing translation. Preserve product promises and business meaning.' },
@@ -95,8 +96,53 @@ export const ExecutorConfigSchema = z.object({
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
 }).strict()
-export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
+export const RegistryIdSchema = z.string().regex(/^[a-z][a-z0-9-]*$/)
+export const RepositoryConfigSchema = z.object({ name: z.string().trim().min(1), provider: z.literal('github'),
+  fullName: z.string().trim().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 'owner/name'), defaultBranch: z.string().trim().min(1).optional(),
+  accessProfileId: RegistryIdSchema, executorProfileId: RegistryIdSchema, enabled: z.boolean() }).strict()
+export type RepositoryConfig = z.infer<typeof RepositoryConfigSchema>
+export const ExecutorProfileSchema = ExecutorConfigSchema.omit({ maxWorkers: true }).extend({ name: z.string().trim().min(1) })
+export type ExecutorProfile = z.infer<typeof ExecutorProfileSchema>
+export const AccessProfileSchema = z.object({ name: z.string().trim().min(1), kind: z.literal('github-cli'), cli: z.string().trim().min(1) }).strict()
+export type AccessProfile = z.infer<typeof AccessProfileSchema>
+export const SchedulerSchema = z.object({ maxWorkers: z.number().int().min(1).max(LIMITS.maxWorkers.max).default(3),
+  maxWorkersPerRepository: z.number().int().min(1).max(LIMITS.maxWorkers.max).optional() }).strict()
+export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}),
+  kind: RegistryIdSchema.optional(), repositoryId: RegistryIdSchema.optional(), routing: z.object({ defaultRepositoryId: RegistryIdSchema.optional(),
+    allowedRepositoryIds: z.array(RegistryIdSchema), chats: z.record(z.string(), RegistryIdSchema).optional() }).strict().optional() }).strict()
+export const TopologySchema = z.object({ repositories: z.record(RegistryIdSchema, RepositoryConfigSchema).default({}),
+  executorProfiles: z.record(RegistryIdSchema, ExecutorProfileSchema).default({}), accessProfiles: z.record(RegistryIdSchema, AccessProfileSchema).default({}),
+  scheduler: SchedulerSchema.default(() => SchedulerSchema.parse({})), sources: z.record(RegistryIdSchema, SourceInstanceSchema).default({}) }).strict().superRefine((value, ctx) => {
+  const issue = (path: string[], message: string) => ctx.addIssue({ code: 'custom', path, message })
+  const repositoryNames = new Set<string>()
+  for (const [id, repo] of Object.entries(value.repositories)) {
+    const name = repo.fullName.toLowerCase()
+    if (repositoryNames.has(name)) issue(['repositories', id, 'fullName'], 'The GitHub repository is already registered')
+    repositoryNames.add(name)
+    if (!value.executorProfiles[repo.executorProfileId]) issue(['repositories', id, 'executorProfileId'], 'Unknown executor profile')
+    if (!value.accessProfiles[repo.accessProfileId]) issue(['repositories', id, 'accessProfileId'], 'Unknown access profile')
+  }
+  const bound = new Set<string>()
+  for (const [id, source] of Object.entries(value.sources)) {
+    if ((source.kind ?? id) === 'feishu' && id !== 'feishu') issue(['sources', id, 'kind'], 'This backend supports one Feishu source, with ID feishu')
+    if (source.enabled && (source.kind ?? id) === 'github' && source.repositoryId) {
+      if (bound.has(source.repositoryId)) issue(['sources', id, 'repositoryId'], 'Only one enabled GitHub source per repository is supported')
+      bound.add(source.repositoryId)
+    }
+    const targets = [source.repositoryId, source.routing?.defaultRepositoryId, ...(source.routing?.allowedRepositoryIds ?? []), ...Object.values(source.routing?.chats ?? {})]
+    if (targets.some(target => target && !value.repositories[target])) issue(['sources', id], 'Unknown repository')
+    if (source.routing && [source.routing.defaultRepositoryId, ...Object.values(source.routing.chats ?? {})].some(target => target && !source.routing!.allowedRepositoryIds.includes(target))) issue(['sources', id, 'routing'], 'Routing target must be allowed')
+    if ((source.kind ?? id) === 'github' && Object.keys(value.repositories).length && !source.repositoryId) issue(['sources', id, 'repositoryId'], 'GitHub source requires a repository binding')
+  }
+})
+export type Topology = z.infer<typeof TopologySchema>
+export const topologyOf = (settings: Topology): Topology => ({ repositories: settings.repositories, executorProfiles: settings.executorProfiles,
+  accessProfiles: settings.accessProfiles, scheduler: settings.scheduler, sources: settings.sources })
 export const SettingsSchema = z.object({
+  repositories: z.record(RegistryIdSchema, RepositoryConfigSchema).default({}),
+  executorProfiles: z.record(RegistryIdSchema, ExecutorProfileSchema).default({}),
+  accessProfiles: z.record(RegistryIdSchema, AccessProfileSchema).default({}),
+  scheduler: SchedulerSchema.default(() => SchedulerSchema.parse({})),
   paused: z.boolean().default(false),
   sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourceInstanceSchema).default({}),
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
@@ -104,7 +150,7 @@ export const SettingsSchema = z.object({
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
 }).strict()
 export type Settings = z.infer<typeof SettingsSchema>
-export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
+export type SettingsBlock = 'policy' | 'eval' | 'executor' | 'topology' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 
@@ -114,7 +160,9 @@ export const POLICY_REVISION = 'mandate-v3'
  * Changes to models, concurrency, pause state, or polling intervals do not invalidate existing decisions.
  */
 export function policyVersion(settings: Settings): string {
-  return key(POLICY_REVISION, JSON.stringify({ rules: settings.policy.rules, mode: settings.eval.mode, sources: settings.policy.sources }))
+  return key(POLICY_REVISION, JSON.stringify({ rules: settings.policy.rules, mode: settings.eval.mode, sources: settings.policy.sources,
+    repositories: Object.fromEntries(Object.entries(settings.repositories).map(([id, repo]) => [id, { fullName: repo.fullName, accessProfileId: repo.accessProfileId, enabled: repo.enabled }])),
+    accessProfiles: settings.accessProfiles, routing: Object.fromEntries(Object.entries(settings.sources).filter(([, source]) => source.repositoryId || source.routing).map(([id, source]) => [id, { enabled: source.enabled, kind: source.kind, repositoryId: source.repositoryId, routing: source.routing }])) }))
 }
 export function allowedSender(settings: Settings, actor: ActorRef): z.infer<typeof AllowedSchema> | undefined {
   return settings.policy.sources[actor.source]?.allowed.find(entry => sameName(entry.id, actor.id))
@@ -164,7 +212,7 @@ export function policyEffects(tickets: readonly Ticket[], old: Settings, now: Se
   return effects
 }
 /** Build the active Policy for gating incoming Triggers and revalidating existing Ticket Mandates. */
-export function settingsPolicy(settings: Settings, sources: SourceScope): Policy {
+export function settingsPolicy(settings: Settings, sources: SourceScope, configurationRevision?: number): Policy {
   const version = policyVersion(settings)
   const mode = settings.eval.mode
   /** Gate non-human triggers: only listed bots (as inferred candidates) and senderless system/CI events may pass; other bots are rejected. */
@@ -188,6 +236,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
   }
   return {
     version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
+    resolveTarget: input => resolveTarget(settings, { ...input, configurationRevision }),
     gate(trigger: Trigger, thread, tickets) {
       if (!trigger.human) return machineGate(trigger)
       const allowed = allowedSender(settings, trigger.actor)
@@ -212,6 +261,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
     admitsInferred: rules => mode === 'auto' && rules.length > 0 && rules.every(id => settings.policy.rules.some(rule => rule.enabled && rule.id === id)),
     revalidate(mandate: Mandate) {
       // Revalidation rules follow docs/002 (Eval path; Resume revalidates).
+      if (mandate.repository && !repositoryAllowed(settings, mandate.repository, mandate.basis.source ?? mandate.actor.source)) return false
       const { basis } = mandate
       const { source } = basis
       const current = source && basis.scope ? listened(sources, source, basis.scope) : undefined

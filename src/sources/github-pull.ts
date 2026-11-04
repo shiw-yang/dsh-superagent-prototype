@@ -15,10 +15,10 @@ const PullSchema = z.looseObject({
 export type Pull = z.infer<typeof PullSchema> & { number: number }
 export const readPull = async (ctx: SourceContext, number: number, signal?: AbortSignal): Promise<Pull> =>
   ({ ...await ctx.commands.withSignal(signal).api(PullSchema, `pulls/${number}`), number })
-const pullNumber = (thread: string): number | undefined => thread.startsWith(`${SOURCE}:`) ? Number(thread.slice(SOURCE.length + 1)) : undefined
-export const pullsOf = (ticket: Pick<Ticket, 'follows'>, open = false): number[] =>
-  (ticket.follows ?? []).filter(item => !open || !item.closed).flatMap(item => pullNumber(item.thread) ?? [])
-export const pullOf = (ticket: Pick<Ticket, 'follows'>): number | undefined => pullsOf(ticket, true).at(-1) ?? pullsOf(ticket).at(-1)
+const pullNumber = (thread: string, source = SOURCE): number | undefined => thread.startsWith(`${source}:`) ? Number(thread.slice(source.length + 1)) : undefined
+export const pullsOf = (ticket: Pick<Ticket, 'follows'>, open = false, source = SOURCE): number[] =>
+  (ticket.follows ?? []).filter(item => !open || !item.closed).flatMap(item => pullNumber(item.thread, source) ?? [])
+export const pullOf = (ticket: Pick<Ticket, 'follows'>, source = SOURCE): number | undefined => pullsOf(ticket, true, source).at(-1) ?? pullsOf(ticket, false, source).at(-1)
 /** True when the PR was opened by the agent account from a branch in the configured repository (not a fork). */
 export const agentPull = (pr: { user: { login: string }; head?: { repo?: { full_name: string } | null } | null },
   deployment: Pick<Deployment, 'github' | 'repository'>): boolean =>
@@ -36,15 +36,15 @@ export function claimPull(ctx: SourceContext, ticketId: string, pr: Pull): strin
   const ticket = ctx.tickets.get(ticketId)
   if (!ticket || !liveTicket(ticket)) return 'Ticket ended because its PR was closed'
   const source = ctx.triggers.get(ticket.origin.triggerId)
-  const started = source?.source === SOURCE && source.meta.isPr === true && source.meta.number === pr.number
+  const started = source?.source === (ctx.id ?? SOURCE) && source.meta.isPr === true && source.meta.number === pr.number
   const opened = agentPull(pr, ctx.deployment) && ticketBranch(ticket, pr.head.ref)
   if (!started && !opened) {
     const { login } = ctx.deployment.github
     return `PR does not belong to this ticket: use the source PR or a PR by ${login} from a branch whose last path segment is DSH_SUPERAGENT_NAME; omit pr_number when no PR exists`
   }
-  const owner = ctx.tickets.open().find(item => pullsOf(item, true).includes(pr.number))
+  const owner = ctx.tickets.open().find(item => pullsOf(item, true, ctx.id ?? SOURCE).includes(pr.number))
   if (owner && owner.id !== ticketId) return 'PR already belongs to another active ticket'
-  const follow = ticket.follows?.find(item => item.thread === `${SOURCE}:${pr.number}`)
+  const follow = ticket.follows?.find(item => item.thread === `${ctx.id ?? SOURCE}:${pr.number}`)
   if (pr.state === 'open' && (!follow || follow.closed || (opened && !follow.own))) bind(ctx, ticketId, pr, opened)
   return undefined
 }
@@ -61,8 +61,8 @@ export async function observePull(ctx: SourceContext, pr: Pull): Promise<boolean
     const candidates = agentPull(pr, ctx.deployment) ? ctx.tickets.open().filter(ticket => ticketBranch(ticket, pr.head.ref)) : []
     const ticket = candidates.length === 1 ? candidates[0]! : undefined
     // A PR the ticket followed until it closed, and that is open again, is followed again.
-    const reopened = ticket?.follows?.some(item => item.thread === `${SOURCE}:${pr.number}` && item.closed)
-    if (ticket && (reopened || pullsOf(ticket, true).every(number => number === pr.number))) claimPull(ctx, ticket.id, pr)
+    const reopened = ticket?.follows?.some(item => item.thread === `${ctx.id ?? SOURCE}:${pr.number}` && item.closed)
+    if (ticket && (reopened || pullsOf(ticket, true, ctx.id ?? SOURCE).every(number => number === pr.number))) claimPull(ctx, ticket.id, pr)
   }
   ctx.threads.describe(`github:${pr.number}`, { facts: { autoMerge: !ended && pr.auto_merge != null ? AUTO_MERGE_ON : null } })
   return ended
@@ -78,7 +78,7 @@ function bind(ctx: SourceContext, ticketId: string, pr: Pull, own: boolean): voi
  * Their subscription to the PR stays so a later human comment there resumes the ticket.
  */
 function closePull(ctx: SourceContext, pr: Pull): void {
-  if (!ctx.tickets.open().some(ticket => pullsOf(ticket, true).includes(pr.number))) return
+  if (!ctx.tickets.open().some(ticket => pullsOf(ticket, true, ctx.id ?? SOURCE).includes(pr.number))) return
   const at = pr.merged_at ?? pr.closed_at ?? new Date().toISOString()
   ctx.tickets.threadClosed({ source: SOURCE, id: String(pr.number) }, pr.merged ? 'merged' : 'closed', at)
 }
@@ -87,19 +87,19 @@ function closePull(ctx: SourceContext, pr: Pull): void {
  * opened, else the last one it followed). The notice language follows the ticket's source request: Chinese when it contains
  * Han characters and no kana, otherwise English.
  */
-export function pullEndNotices(ticket: Ticket, request: string, repository: string): OutboundMessage[] {
+export function pullEndNotices(ticket: Ticket, request: string, repository: string, source = SOURCE): OutboundMessage[] {
   const outcome = ticket.ended?.outcome
-  const follows = (ticket.follows ?? []).filter(item => item.closed && pullNumber(item.thread) !== undefined)
+  const follows = (ticket.follows ?? []).filter(item => item.closed && pullNumber(item.thread, source) !== undefined)
   const latest = (items: Follow[]) => items.sort((a, b) => b.closed!.at.localeCompare(a.closed!.at))[0]
   const follow = latest(follows.filter(item => item.own)) ?? latest(follows)
   if ((outcome !== 'merged' && outcome !== 'closed') || !follow) return []
-  const number = pullNumber(follow.thread)!
+  const number = pullNumber(follow.thread, source)!
   const url = githubPage(repository, number, true)
   const chinese = /\p{Script=Han}/u.test(request) && !/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(request)
   const text = chinese
     ? outcome === 'merged' ? `[PR #${number}](${url}) 已合并。` : `[PR #${number}](${url}) 已关闭，未合并。`
     : outcome === 'merged' ? `[PR #${number}](${url}) has merged.` : `[PR #${number}](${url}) was closed without merging.`
   // GitHub timelines and linked issues already show the merge or closure, so GitHub channels are skipped.
-  return ticket.channels.filter(channel => channel.source !== SOURCE).map(channel => ({
-    id: key('pr-terminal', String(number), channel.source, JSON.stringify(channel.address), outcome), channel, text, kind: 'notice', ticketId: ticket.id }))
+  return ticket.channels.filter(channel => channel.source !== SOURCE && channel.source !== source).map(channel => ({
+    id: key('pr-terminal', ...(source === SOURCE ? [] : [source, repository]), String(number), channel.source, JSON.stringify(channel.address), outcome), channel, text, kind: 'notice', ticketId: ticket.id }))
 }

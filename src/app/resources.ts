@@ -51,7 +51,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'models', holds: 'model providers, the DSH default and each role\'s model' },
   { name: 'models/<provider>', holds: 'one provider\'s models' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
-  { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes', executor: true },
+  { name: 'github/…', holds: 'a GitHub original in the worker ticket repository; the main Session must use github/<source-instance-id>/issues/<number> or /pulls/<number> when multiple repositories are configured', executor: true },
 ]
 export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(resource => !executor || resource.executor)
   .map(resource => `${resource.name}: ${resource.holds}`).join('; ')
@@ -61,6 +61,9 @@ export interface ResourceHost {
   readonly pages: TextCache
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'skills' | 'defaultChanged'>
   readonly commands: Commands
+  /** Resolve a source's own account/repository instead of the installation's legacy default. */
+  commandsFor?(sourceId: string): Commands
+  commandsForRepository?(repositoryId: string): Commands
   readonly masterId: string
   readonly context: Context
   promptVersion(sessionId: string): PromptVersion
@@ -107,6 +110,31 @@ async function sourcePage(read: Read, source: string, fetch: () => Promise<unkno
   if (body === undefined) throw new Error(`Read this ${source === 'feishu' ? 'Feishu' : 'GitHub'} resource from offset 0 first`)
   if (offset === 0) host.pages.set(`${sessionId}:${resource}`, body)
   return text(read, body)
+}
+/** Resolve GitHub resources before reading even cached pages, so a worker cannot cross its ticket's target. */
+function githubResource(read: Read): { commands: Commands; resource: string; sourceId?: string } {
+  const { host, ticketId } = read
+  const settings = host.store.settings()
+  const [first, ...rest] = read.rest.split('/')
+  const explicit = first && !['issues', 'pulls', 'commits'].includes(first) ? first : undefined
+  const ticket = ticketId ? host.store.tickets.get(ticketId) : undefined
+  if (ticketId && !ticket) throw new Error('Unknown ticket')
+  const repositories = Object.keys(settings.repositories)
+  if (ticket && repositories.length && !ticket.repository) throw new Error('This legacy ticket has no verified repository')
+  if (explicit) {
+    const source = settings.sources[explicit]
+    if (!source || (source.kind ?? explicit) !== 'github') throw new Error('Unknown GitHub source instance')
+    if (ticket && source.repositoryId !== ticket.repository) throw new Error('GitHub resource is outside this ticket repository')
+    if (!host.commandsFor) throw new Error('Source-scoped GitHub access is unavailable')
+    return { commands: host.commandsFor(explicit).withSignal(read.signal), resource: `github/${rest.join('/')}`, sourceId: explicit }
+  }
+  const repositoryId = ticket?.repository ?? (repositories.length === 1 ? repositories[0] : undefined)
+  if (!ticket && repositories.length > 1) throw new Error('Name the GitHub source instance: github/<source-id>/issues/<number>')
+  if (repositoryId) {
+    if (!host.commandsForRepository) throw new Error('Repository-scoped GitHub access is unavailable')
+    return { commands: host.commandsForRepository(repositoryId).withSignal(read.signal), resource: read.resource }
+  }
+  return { commands: host.commands.withSignal(read.signal), resource: read.resource }
 }
 const THREAD_DECISIONS = 5
 const triggerLine = (trigger: Trigger) => ({ trigger_id: trigger.id, actor: trigger.actor.id, human: trigger.human, at: trigger.at,
@@ -206,7 +234,17 @@ const ROUTES: readonly Route[] = [
     const commands = read.host.commands.withSignal(read.signal)
     return sourcePage(read, 'feishu', () => feishuRead(commands, ref, read.resource, read.host.feishuPageSize()))
   }],
-  ['github/', read => sourcePage(read, 'github', () => readGithub(read.host.commands.withSignal(read.signal), read.resource))],
+  ['github/', read => {
+    const selected = githubResource(read)
+    return sourcePage(read, 'github', async () => {
+      const value = await readGithub(selected.commands, selected.resource)
+      // Keep the selected instance on pagination links rather than falling back to an ambiguous default.
+      if (selected.sourceId && value && typeof value === 'object' && 'next_resource' in value && typeof value.next_resource === 'string') {
+        return { ...value, next_resource: value.next_resource.replace(/^github\//, `github/${selected.sourceId}/`) }
+      }
+      return value
+    })
+  }],
   ['trigger/', async read => {
     const { host, rest, ticketId, offset, signal } = read
     if (!rest || rest.includes('/')) throw new Error('Unknown context resource')

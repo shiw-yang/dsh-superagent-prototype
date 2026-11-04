@@ -62,6 +62,7 @@ export class Commands {
    * @param environment - variables overriding `process.env` for every command (such as isolated git settings).
    */
   constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
+  forDeployment(resolved: () => Deployment): Commands { return new Commands(resolved, this.environment, this.signal) }
   get deployment(): Deployment { return this.resolved() }
   get repository(): string { return this.deployment.repository }
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }

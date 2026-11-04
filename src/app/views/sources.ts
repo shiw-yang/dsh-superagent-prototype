@@ -14,8 +14,9 @@ export function sourceHealth(sources: SourceRegistry, instance: SourceInstance, 
   const kind = sources.kind(instance.kind)
   const starting: Health = { state: 'starting', detail: '' }
   const parts = (kind?.health ?? []).map(name => {
-    const entry = health[name]
-    return { name, ...(!entry || (instance.enabled && entry.code === 'sourceOff') ? starting : entry) }
+    const scoped = instance.id === instance.kind ? name : `${instance.id}:${name}`
+    const entry = health[scoped]
+    return { name: scoped, ...(!entry || (instance.enabled && entry.code === 'sourceOff') ? starting : entry) }
   })
   return { id: instance.id, title: kind?.title ?? { zh: instance.id, en: instance.id }, health: parts }
 }

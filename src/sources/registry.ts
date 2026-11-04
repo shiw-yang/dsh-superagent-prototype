@@ -24,7 +24,9 @@ export class SourceRegistry implements SourceScope {
     if (synced) throw refused(synced)
     const entries = new Map<string, HealthEntry>()
     const release = () => { for (const [name, entry] of entries) { entry.release(); this.health.delete(name) } }
-    for (const name of kind.health) {
+    const instanceIds = Object.entries(this.settings().sources).filter(([id, stored]) => (stored.kind ?? id) === kind.kind && id !== kind.kind).map(([id]) => id)
+    const healthNames = [...kind.health, ...instanceIds.flatMap(id => kind.health.map(name => `${id}:${name}`))]
+    for (const name of healthNames) {
       try { entries.set(name, this.board.claim(name, { state: 'starting', detail: '' })) }
       catch { release(); throw refused(name) }
     }
@@ -40,42 +42,57 @@ export class SourceRegistry implements SourceScope {
   healthEntries(names: readonly string[]): Map<string, HealthEntry> {
     return new Map(names.flatMap(name => { const entry = this.health.get(name); return entry ? [[name, entry] as const] : [] }))
   }
-  kind(id: string): SourceKind | undefined { return this.kinds.get(id) }
+  private access?: { commands(id: string): Commands; links(id: string): ChannelLinks }
+  bindAccess(access: { commands(id: string): Commands; links(id: string): ChannelLinks }): void { this.access = access }
+  commands(id: string, fallback: Commands): Commands {
+    if (this.access) {
+      const access = this.access
+      // Rebind only account/deployment selection, preserving the caller's timeout, cancellation and environment.
+      return fallback.forDeployment(() => access.commands(id).deployment)
+    }
+    if (id !== this.kind(id)?.kind || this.instance(id)?.repositoryId) throw new Error(`Source access is not bound: ${id}`)
+    return fallback
+  }
+  kind(id: string): SourceKind | undefined { return this.kinds.get(this.settings().sources[id]?.kind ?? id) }
   /** Every registered kind's instance ordered by ID, followed by stored instances whose kind is not installed (with their config kept as stored). */
   instances(settings = this.settings()): (SourceInstance & { installed: boolean })[] {
-    const installed = [...this.kinds.values()].sort((a, b) => a.kind.localeCompare(b.kind)).map(kind => ({ ...this.resolve(kind, settings.sources[kind.kind]), installed: true }))
-    const orphaned = Object.entries(settings.sources).filter(([id]) => !this.kinds.has(id)).map(([id, stored]) => ({ id, kind: id, enabled: stored.enabled, config: stored.config, installed: false }))
-    return [...installed, ...orphaned]
+    const ids = new Set([...this.kinds.keys(), ...Object.keys(settings.sources)])
+    return [...ids].sort().map(id => {
+      const stored = settings.sources[id]
+      const kind = this.kinds.get(stored?.kind ?? id)
+      return kind ? { ...this.resolve(kind, stored, id, settings), installed: true }
+        : { ...stored!, id, kind: stored?.kind ?? id, installed: false }
+    })
   }
   instance<C extends Record<string, unknown>>(id: string, settings = this.settings()): SourceInstance<C> | undefined {
-    const kind = this.kinds.get(id)
-    return kind ? this.resolve(kind, settings.sources[id]) as SourceInstance<C> : undefined
+    const kind = this.kinds.get(settings.sources[id]?.kind ?? id)
+    return kind ? this.resolve(kind, settings.sources[id], id, settings) as SourceInstance<C> : undefined
   }
   validate(id: string, value: { enabled: boolean; config: unknown }): { enabled: boolean; config: Record<string, unknown> } {
-    const kind = this.kinds.get(id)
+    const kind = this.kind(id)
     if (!kind) throw new Error(`Source kind not installed: ${id}`)
     return { enabled: value.enabled, config: kind.schema.parse(value.config) }
   }
   /** Validates each Source's part of a submitted Policy against its kind; policy parts for uninstalled Source kinds are kept as stored. */
   validatePolicy(parts: Record<string, Record<string, unknown>>): Record<string, Record<string, unknown> & { allowed: { id: string; name?: string }[] }> {
     return Object.fromEntries(Object.entries(parts).map(([id, part]) => {
-      const policy = this.kinds.get(id)?.policy
+      const policy = this.kind(id)?.policy
       // `admission` is validated by the Policy's own schema (shared across all kinds), while the kind validates the rest of its part.
       const { admission, ...rest } = part
       return [id, policy ? { ...policy.schema.parse(rest), admission: AdmissionTableSchema.parse(admission ?? {}) } : part as Record<string, unknown> & { allowed: { id: string; name?: string }[] }]
     }))
   }
   policyPart(id: string, settings = this.settings()) {
-    const policy = this.kinds.get(id)?.policy
+    const policy = this.kind(id)?.policy
     if (!policy) return undefined
     const { admission, ...rest } = settings.policy.sources[id] ?? {}
     const parsed = policy.schema.safeParse(rest)
     return { ...parsed.success ? parsed.data : policy.schema.parse({}), admission: AdmissionTableSchema.safeParse(admission ?? {}).data ?? {} }
   }
   channelAllowed(channel: { source: string; address: Record<string, string> }, settings = this.settings()): boolean {
-    const kind = this.kinds.get(channel.source)
+    const kind = this.kind(channel.source)
     if (!kind) return false
-    const instance = this.resolve(kind, settings.sources[channel.source])
+    const instance = this.resolve(kind, settings.sources[channel.source], channel.source, settings)
     return instance.enabled && (kind.channel?.allowed?.(channel.address, instance.config) ?? true)
   }
   /** Environment variable declarations for every installed kind, whether enabled or disabled. */
@@ -83,9 +100,9 @@ export class SourceRegistry implements SourceScope {
     return [...this.kinds.values()].sort((a, b) => a.kind.localeCompare(b.kind)).flatMap(kind => kind.environment ? [{ kind: kind.kind, variables: kind.environment.variables }] : [])
   }
   environments(settings = this.settings()) {
-    return [...this.kinds.values()].sort((a, b) => a.kind.localeCompare(b.kind)).flatMap(kind => {
-      const instance = this.resolve(kind, settings.sources[kind.kind])
-      return kind.environment && instance.enabled ? [{ kind, environment: kind.environment, config: instance.config }] : []
+    return this.instances(settings).flatMap(instance => {
+      const kind = this.kinds.get(instance.kind)
+      return kind?.environment && instance.enabled ? [{ kind, environment: kind.environment, config: instance.config, sourceId: instance.id }] : []
     })
   }
   /**
@@ -93,46 +110,60 @@ export class SourceRegistry implements SourceScope {
    * `'gone'` when the target (or a kind without channels) can never receive it.
    */
   async send(message: OutboundMessage, commands: Commands): Promise<'sent' | 'gone' | 'waiting'> {
-    const kind = this.kinds.get(message.channel.source)
-    if (!kind) return 'waiting'
-    return kind.channel ? kind.channel.send({ commands }, message) : 'gone'
+    const kind = this.kind(message.channel.source)
+    if (!kind || !this.instance(message.channel.source)?.enabled) return 'waiting'
+    return kind.channel ? kind.channel.send({ commands: this.commands(message.channel.source, commands) }, message) : 'gone'
   }
   link(channel: ChannelRef, links: ChannelLinks): ChannelLink {
-    const link = this.kinds.get(channel.source)?.channel?.link(channel.address, links)
+    const link = this.kind(channel.source)?.channel?.link(channel.address, this.access?.links(channel.source) ?? (this.instance(channel.source)?.repositoryId ? {} : links))
     return link ?? { url: '', label: { zh: channel.source, en: channel.source } }
   }
   find(query: string): { threads: string[]; terms: string[] } {
-    const found = [...this.kinds.values()].flatMap(kind => kind.find ? [kind.find(query)] : [])
+    const repository = /github\.com\/([^/]+\/[^/]+)\/(?:pull|issues)\//i.exec(query)?.[1]?.toLowerCase()
+    const found = this.instances().flatMap(instance => {
+      const kind = this.kind(instance.id)
+      if (!kind?.find) return []
+      if (repository && kind.kind === 'github') {
+        const target = instance.repositoryId ? this.settings().repositories[instance.repositoryId]?.fullName : instance.config.repository
+        const legacyUnconfigured = instance.id === 'github' && !Object.keys(this.settings().repositories).length && !target
+        if (!legacyUnconfigured && (typeof target !== 'string' || target.toLowerCase() !== repository)) return []
+      }
+      const result = kind.find(query)
+      return [{ ...result, threads: result.threads.map(thread => instance.id !== kind.kind && thread.startsWith(`${kind.kind}:`) ? `${instance.id}:${thread.slice(kind.kind.length + 1)}` : thread) }]
+    })
     return { threads: [...new Set(found.flatMap(item => item.threads))], terms: [...new Set(found.flatMap(item => item.terms))] }
   }
-  repliesTo(trigger: Trigger): string | undefined { return this.kinds.get(trigger.source)?.repliesTo?.(trigger) }
+  repliesTo(trigger: Trigger): string | undefined { return this.kind(trigger.source)?.repliesTo?.(trigger) }
   threadContext(trigger: Trigger, settings = this.settings()): TriggerContext | undefined {
-    const kind = this.kinds.get(trigger.source)
+    const kind = this.kind(trigger.source)
     const context = kind?.threadContext
     if (!kind || !context) return undefined
-    const { config } = this.resolve(kind, settings.sources[kind.kind])
+    const { config } = this.resolve(kind, settings.sources[trigger.source], trigger.source, settings)
     return {
       messageId: context.messageId(trigger),
-      read: (commands, part, cursor) => context.read(commands, trigger, part, cursor, config),
+      read: (commands, part, cursor) => context.read(this.commands(trigger.source, commands), trigger, part, cursor, config),
       images: text => context.images?.(text) ?? [],
       image: async (agent, commands, message, key, stateDir, signal) => {
         if (!context.image) throw new Error(`The ${kind.kind} Source has no images`)
-        return context.image(agent, commands, trigger, message, key, stateDir, signal)
+        return context.image(agent, this.commands(trigger.source, commands), trigger, message, key, stateDir, signal)
       },
     }
   }
   scope(input: { source: string; meta: Record<string, unknown> }, settings = this.settings()): ScopeResult {
-    const kind = this.kinds.get(input.source)
+    const kind = this.kind(input.source)
     const stored = settings.sources[input.source]
     // Without its kind plugin the stored scope cannot be evaluated, so a configured Source whose plugin is missing listens to nothing.
     if (!kind) return stored ? { listened: false, reason: 'source_not_installed' } : { listened: true, observed: false }
-    const instance = this.resolve(kind, stored)
+    const instance = this.resolve(kind, stored, input.source, settings)
     if (!instance.enabled) return { listened: false, reason: 'source_disabled' }
     return kind.scope ? kind.scope({ meta: input.meta }, instance.config) : { listened: true, observed: false }
   }
   /** Falls back to schema defaults and disables the instance when stored configuration fails validation. */
-  private resolve(kind: SourceKind, stored: { enabled: boolean; config: Record<string, unknown> } | undefined): SourceInstance {
+  private resolve(kind: SourceKind, stored: Settings['sources'][string] | undefined, id = kind.kind, settings = this.settings()): SourceInstance {
     const parsed = kind.schema.safeParse(stored?.config ?? {})
-    return { id: kind.kind, kind: kind.kind, enabled: parsed.success && (stored?.enabled ?? true), config: parsed.success ? parsed.data : kind.schema.parse({}) }
+    const repository = stored?.repositoryId ? settings.repositories[stored.repositoryId] : undefined
+    const requiresBinding = kind.kind === 'github' && Object.keys(settings.repositories).length > 0
+    const enabled = parsed.success && (stored?.enabled ?? true) && (!requiresBinding || !!stored?.repositoryId) && (!stored?.repositoryId || repository?.enabled === true)
+    return { ...stored, id, kind: kind.kind, enabled, config: parsed.success ? parsed.data : kind.schema.parse({}) }
   }
 }

@@ -44,7 +44,7 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
   const instances = sources.instances()
   const running = instances.filter(instance => instance.enabled && instance.installed).map(instance => sourceHealth(sources, instance, health))
   // Exclude source-owned and policy-sync health entries so only core runtime errors surface as `runtime-error`.
-  const sourceParts = new Set(instances.flatMap(instance => sources.kind(instance.kind)?.health ?? []))
+  const sourceParts = new Set(instances.flatMap(instance => sourceHealth(sources, instance, health).health.map(part => part.name)))
   const problems = [
     ...(setup ? [{ kind: 'setup' as const, ...setup }] : []),
     ...(running.length ? [] : [{ kind: 'no-source' as const }]),
@@ -71,7 +71,8 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
   return {
     problems,
     person: open.filter(ticket => ticketStage(ticket).stage === 'person').map(ticket => ticketRow(view, ticket)),
-    executor: { ...load, maxWorkers: settings.executor.maxWorkers, idle: open.filter(ticket => ticketStage(ticket).stage === 'idle').length },
+    executor: { ...load, maxWorkers: Object.keys(settings.repositories).length ? settings.scheduler.maxWorkers : settings.executor.maxWorkers,
+      idle: open.filter(ticket => ticketStage(ticket).stage === 'idle').length },
     flow: { received, filtered, triggers: received - filtered, judged: judgement.judged, accepted: judgement.accepted,
       evaluating: evaluating.length, dropped: store.read.droppedSince(since) },
     policyVersion: policyVersionValue,

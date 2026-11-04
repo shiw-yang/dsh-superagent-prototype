@@ -1,4 +1,5 @@
 /** DSH executor: manages one persistent worker session and workspace directory per ticket. */
+import { plannedExecution, repositoryExecutionProblem, workerEnvironmentProblem } from './plan.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -76,6 +77,8 @@ export interface ExecutorHost {
   paused(): boolean
   /** Execution environment variables for `ticket`, passed to its workspace prepare command. */
   environment(ticket: Ticket): Variable[]
+  /** Current deployment health and compatibility with the installed global worker environment. */
+  executionProblem?(ticket: Ticket): string | undefined
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
   /** Stored Trigger of the message `trigger` replies to, when it replies to one. */
   repliedTo(trigger: Trigger): Trigger | undefined
@@ -107,7 +110,7 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  return { name, directory: join(executionRoot(settings, stateDir), name), assignment }
+  return plannedExecution(ticket, { name, directory: join(executionRoot(settings, stateDir), name), assignment }, settings, stateDir)
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
@@ -166,7 +169,8 @@ export function inputMessage(input: TicketInput, trigger?: object): string | und
  * Tracks active and starting worker sessions against the configured concurrency limit: a ticket holds a slot while its
  * worker's turn runs, while its shell jobs or subagents run after that turn ended, and while a launch or wake starts that worker.
  * DshExecutor reserves slots synchronously before awaiting launch or wake work so two starts cannot take the last slot,
- * and allows one extra slot beyond the limit for human follow-ups (`by === 'person'`) so they never wait behind new launches.
+ * and, only for legacy installations, allows one extra slot for human follow-ups (`by === 'person'`).
+ * Managed repositories enforce both scheduler limits strictly, including human wakes.
  */
 export class WorkerSlots {
   /** Tickets currently holding a startup slot, mapped to whether the start is a launch, a wake, or a wake for a person's message. */
@@ -175,7 +179,8 @@ export class WorkerSlots {
    * @param running - Returns the ticket IDs whose worker holds a slot (see `DshExecutor.running`).
    * @param max - Returns the configured maximum number of concurrent worker slots.
    */
-  constructor(private readonly running: () => string[], private readonly max: () => number) {}
+  constructor(private readonly running: () => string[], private readonly max: () => number,
+    private readonly repository?: (ticketId: string) => string | undefined, private readonly repositoryMax?: () => number | undefined, private readonly strict: () => boolean = () => false) {}
   /** Number of slots currently in use across running workers and starting reservations. */
   used(): number { return new Set([...this.running(), ...this.starting.keys()]).size }
   /** How many launches may run concurrently: the slots not held by a running worker or a wake reservation. */
@@ -185,13 +190,16 @@ export class WorkerSlots {
   }
   /**
    * Reserves a startup slot for `ticketId`; idempotent if `ticketId` already holds a starting slot.
-   * A wake for a person's message (`by === 'person'`) may use one extra slot beyond `max()`.
+   * A wake for a person's message may use one extra global slot only when strict scheduling is off.
    * Call `free(ticketId)` once the worker turn is running or the launch/wake attempt ends.
    * @throws Later when no slot is free.
    */
   reserve(ticketId: string, by: 'launch' | 'wake' | 'person'): void {
     if (this.starting.has(ticketId)) return
-    if (this.used() >= this.max() + (by === 'person' ? 1 : 0)) throw new Later('No worker slot is free')
+    if (this.used() >= this.max() + (by === 'person' && !this.strict() ? 1 : 0)) throw new Later('No worker slot is free')
+    const repository = this.repository?.(ticketId), limit = this.repositoryMax?.()
+    if (repository && limit !== undefined && new Set([...this.running(), ...this.starting.keys()]
+      .filter(id => this.repository?.(id) === repository)).size >= limit) throw new Later('No repository worker slot is free')
     this.starting.set(ticketId, by)
   }
   /** Releases `ticketId`'s starting slot once its worker session is running or the launch/wake attempt has ended. */
@@ -227,7 +235,9 @@ export class DshExecutor implements Executor {
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
-      () => host.store.settings().executor.maxWorkers)
+      () => { const settings = host.store.settings(); return Object.keys(settings.repositories ?? {}).length ? settings.scheduler.maxWorkers : settings.executor.maxWorkers },
+      id => host.store.tickets.get(id)?.repository, () => host.store.settings().scheduler?.maxWorkersPerRepository,
+      () => Object.keys(host.store.settings().repositories ?? {}).length > 0)
     // Each launch reserves a worker slot so launches run concurrently while slots are free.
     host.effects.handle('launch', payload => this.launchQueued(payload), { limit: () => host.paused() ? 0 : this.slots.launches(),
       retry: [5000, 300_000] })
@@ -247,7 +257,7 @@ export class DshExecutor implements Executor {
   private async prepareDirectory(ticket: Ticket): Promise<void> {
     const directory = ticket.execution?.directory ?? ''
     await mkdir(dirname(directory), { recursive: true })
-    const command = this.host.store.settings().executor.prepare.trim()
+    const command = (ticket.execution?.plan?.prepare ?? this.host.store.settings().executor.prepare).trim()
     const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
     // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
     const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
@@ -300,6 +310,7 @@ export class DshExecutor implements Executor {
         const assignment = ticket && liveTicket(ticket) ? runningAssignment(ticket) : undefined
         const inputId = ticket?.undelivered[0]
         if (!ticket || !assignment || inputId === undefined) return
+        this.authorize(ticket)
         // Waking an idle worker reserves a slot (including the extra slot reserved for human follow-ups).
         const sessionId = workerSessionId(ticketId)
         if (!woken && !this.running(ticket)) {
@@ -331,6 +342,7 @@ export class DshExecutor implements Executor {
     const live = () => {
       const current = this.host.store.tickets.get(ticket.id)
       if (!current || !liveTicket(current) || runningAssignment(current)?.id !== assignment.id) throw new Error('The ticket ended or another Assignment took it over')
+      this.authorize(current)
       // A stop of the worker's background work that started meanwhile ends with a cancel, which would drop the Input.
       if (this.stopping.has(ticket.id)) throw new Later('The worker\'s background work is stopping')
     }
@@ -421,20 +433,56 @@ export class DshExecutor implements Executor {
     })
   }
   private relay({ id, text }: { id: string; text: string }): void { this.host.sessions.relay(id, text) }
+  private authorize(ticket: Ticket): void {
+    const settings = this.host.store.settings()
+    const problem = repositoryExecutionProblem(settings, ticket)
+      ?? (this.host.executionProblem ? this.host.executionProblem(ticket) : workerEnvironmentProblem(settings, ticket))
+    if (problem) throw new Later(problem)
+  }
   private async launch(ticket: Ticket, assignment: Assignment): Promise<void> {
+    this.authorize(ticket)
+    const historical = !ticket.execution?.plan
+    if (ticket.execution && ticket.repository && !ticket.execution.plan) {
+      ticket = { ...ticket, execution: plannedExecution(ticket, ticket.execution, this.host.store.settings(), this.host.machine.stateDir) }
+    }
     const current = () => {
       if (this.host.closing()) throw new Error('dsh-superagent is stopping')
       if (this.host.paused()) throw new Later('Processing is paused')
       const stored = this.host.store.tickets.get(ticket.id)
+      if (stored) this.authorize(stored)
       return !!stored && liveTicket(stored) && latestAssignment(stored)?.id === assignment.id
     }
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
     if (!current()) return
-    // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
-    if (!await stat(workspace).then(() => true, () => false)) {
-      await this.prepareDirectory(ticket)
-      if (!current()) return
+    const exists = await stat(workspace).then(info => { if (!info.isDirectory()) throw new PrepareFailed('Worker workspace is not a directory'); return true },
+      (error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return false; throw error })
+    if (ticket.execution?.plan?.preparedAt && !exists) throw new PrepareFailed('The prepared worker workspace is missing; restore it before retrying')
+    if (exists && ticket.execution?.plan && !ticket.execution.plan.preparedAt && !historical) {
+      throw new PrepareFailed('Workspace exists without a successful preparation record; inspect and recover it before retrying')
+    }
+    if (historical && ticket.execution?.plan) {
+      // Legacy directory reuse is grandfathered, not proof of repository identity. Verify local
+      // credential configuration before recording readiness, so a pause/restart cannot leave a
+      // newly attached plan that misclassifies the historical directory as a failed preparation.
+      if (exists) {
+        await verifyDirectory(workspace, this.host.context.subprocess, this.host.lifetime)
+        ticket.execution.plan.preparedAt = now()
+      }
+      const stored = this.host.store.tickets.get(ticket.id)
+      if (!stored || latestAssignment(stored)?.id !== assignment.id) return
+      ticket = { ...stored, execution: ticket.execution }
+      this.host.store.tickets.save(ticket)
+    }
+    if (!current()) return
+    if (!exists) await this.prepareDirectory(ticket)
+    else if (!(historical && ticket.execution?.plan)) await verifyDirectory(workspace, this.host.context.subprocess, this.host.lifetime)
+    if (ticket.execution?.plan && !ticket.execution.plan.preparedAt) {
+      const stored = this.host.store.tickets.get(ticket.id)
+      // Successful preparation is durable even if a pause or revocation arrived while it ran.
+      if (!stored?.execution?.plan || latestAssignment(stored)?.id !== assignment.id) return
+      ticket = { ...stored, execution: { ...stored.execution, plan: { ...stored.execution.plan, preparedAt: now() } } }
+      this.host.store.tickets.save(ticket)
     }
     if (!current()) return
     const sessionId = workerSessionId(ticket.id)
@@ -564,11 +612,11 @@ export class DshExecutor implements Executor {
       if (this.host.paused()) { this.after(SLOT_WAIT_MS, go); return }
       const sessionId = workerSessionId(ticketId)
       const waking = !this.running(ticket)
-      try { if (waking) this.slots.reserve(ticketId, 'wake') } catch (failure) {
+      try { this.authorize(ticket); if (waking) this.slots.reserve(ticketId, 'wake') } catch (failure) {
         if (!(failure instanceof Later)) throw failure
         this.after(SLOT_WAIT_MS, go); return
       }
-      const sent = this.host.sessions.prompt(sessionId, `retry:${assignmentId}:${tries}`, text, 'queue')
+      const sent = this.host.sessions.prompt(sessionId, `retry:${assignmentId}:${tries}`, text, 'queue', () => this.authorize(this.host.store.tickets.get(ticketId) ?? ticket))
       void this.background(sent.finally(() => { if (waking) this.slots.free(ticketId); this.resuming.delete(assignmentId) })
         .catch(failure => { this.failed(ticketId, String(failure)) }))
     }

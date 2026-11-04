@@ -55,6 +55,18 @@ function referencedTickets(host: LinkHost, trigger: Trigger, known: readonly Tic
 export async function candidateCard(host: LinkHost, candidate: Candidate) {
   const primary = candidate.triggers.at(-1)!
   const settings = host.store.settings()
+  const source = settings.sources[primary.source]
+  const allowed = (source?.kind ?? primary.source) === 'github' ? (source?.repositoryId ? [source.repositoryId] : [])
+    : source?.routing?.allowedRepositoryIds ?? []
+  const chat = primary.meta.chatId ?? primary.meta.chat_id
+  const defaultRepository = source?.repositoryId ?? (typeof chat === 'string' ? source?.routing?.chats?.[chat] : undefined)
+    ?? source?.routing?.defaultRepositoryId
+  const routing = Object.keys(settings.repositories).length ? { routing: { sourceInstanceId: primary.source,
+    ...defaultRepository ? { defaultRepositoryId: defaultRepository } : {},
+    repositories: allowed.flatMap(id => {
+      const repository = settings.repositories[id]
+      return repository?.enabled ? [{ id, name: repository.name, fullName: repository.fullName }] : []
+    }) } } : {}
   const delivered = host.store.triggers.disposition(primary.id)?.fanout ?? []
   const referenced = referencedTickets(host, primary, candidate.tickets)
   // Triggers that a worker Session handed back as outside its ticket's scope, with the worker's reason.
@@ -63,7 +75,7 @@ export async function candidateCard(host: LinkHost, candidate: Candidate) {
   // Format the primary trigger like a worker input (including the message it replies to) and summarize earlier batch triggers as cards.
   const others = candidate.triggers.filter(trigger => trigger.id !== primary.id)
   return { ...triggerMessage(primary, await sourceLink(host, primary), undefined, repliedTo(host, primary)), strength: candidate.strength,
-    mode: settings.eval.mode, ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
+    mode: settings.eval.mode, ...routing, ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
     ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(candidate.tickets),
     ...(delivered.length ? { delivered_to: delivered } : {}), ...(referenced.length ? { referenced_tickets: referenced.map(ticketCard) } : {}),
     next_action: candidate.strength === 'explicit' ? 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.'

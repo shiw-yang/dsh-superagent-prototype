@@ -2,7 +2,7 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { liveTicket, threadKey } from './model.ts'
-import type { Decision, DecisionKind, Evaluation, Mandate, MandateBasis, Strength, Thread, Trigger } from './model.ts'
+import type { Decision, DecisionKind, Evaluation, Mandate, MandateBasis, Strength, Thread, Ticket, Trigger } from './model.ts'
 import type { AssessmentOutcome, Candidate, Policy } from './ports.ts'
 import { said, type Reason } from './reasons.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
@@ -307,7 +307,14 @@ export class Evals extends EnginePart {
     const at = this.now()
     const basis = { ...evaluation.basis, ...(outcome.rules ? { rules: outcome.rules } : {}) }
     const { strength, policyVersion, actor } = evaluation
-    const mandate: Mandate = { strength, policyVersion, basis, actor, scope: outcome.scope }
+    let target: { repository?: string; routing?: Ticket['routing'] } = {}
+    try {
+      target = this.policy().resolveTarget?.({ sourceInstanceId: basis.source ?? actor.source, repository: outcome.repository, meta: basis.scope }) ?? {}
+    } catch (error) {
+      return this.finish(thread, evaluation, { kind: 'unavailable', reason: reasonOf(error instanceof Error ? error.message : String(error)) })
+    }
+    outcome = { ...outcome, ...target }
+    const mandate: Mandate = { strength, policyVersion, basis, actor, scope: outcome.scope, ...(target.repository ? { repository: target.repository } : {}) }
     const ticketId = key('ticket', evaluation.id)
     const audit = outcome.audit ? { audit: outcome.audit } : {}
     const decision = this.finish(thread, evaluation, { kind: 'accept', reason: reasonOf(outcome.reason), ...audit, mandate, ticketId })

@@ -4,6 +4,7 @@ import type { DecisionRow, ThreadFacts, ThreadRow, TicketRow } from './api.ts'
 import { Icon, Tag } from './controls.tsx'
 import { decisionMark, threadMark, ticketMark } from './marks.ts'
 import { usePanel } from './provider.tsx'
+import { RepositoryBadge } from './topology.tsx'
 import { actorName, localized, readableMarkers, reasonLabel, valueLabel } from './text.ts'
 import { ActionLink, ConfirmButton, LabelValue, SessionButton, StageMark, When } from './widgets.tsx'
 
@@ -21,6 +22,7 @@ export function TicketLine({ ticket, question, onChanged, context }: {
       <div className="dt-row-title"><button type="button" className="dt-open" onClick={() => navigate({ page: 'execution',
         id: ticket.id })}>{ticket.title}</button></div>
       <div className="dt-row-meta dt-ticket-meta">
+        <RepositoryBadge repository={ticket.repository} />
         {ticket.threads.map(thread => <ThreadChip key={thread.key} thread={thread} />)}
         {context && <ContextTag />}
         {ticket.undelivered > 0 && <LabelValue label={t('ticketUndeliveredLabel')} value={ticket.undelivered} />}

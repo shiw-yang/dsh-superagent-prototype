@@ -124,6 +124,7 @@ export type MandateBasis = Received & { sender?: string; rules?: string[] } & (
 
 /** Immutable authorization produced by an accept decision; execution is bounded by it and it never changes. */
 export interface Mandate {
+  repository?: string
   strength: Strength
   policyVersion: string
   /** How the gate admitted it, for re-validation and audit. */
@@ -275,6 +276,8 @@ export type TicketOutcome = 'completed' | 'merged' | 'closed' | 'dropped' | 'sto
 export interface Attention { id: string; question: string; triggerId?: string }
 /** Ticket aggregate: an authorized work item with its assignments, channels, thread bindings, and inputs. */
 export interface Ticket {
+  repository?: string
+  routing?: { sourceInstanceId: string; basis: 'source' | 'explicit' | 'default' | 'manual'; configurationRevision?: number }
   id: string
   title: string
   decisionId: string
@@ -312,7 +315,12 @@ export interface Ticket {
  * Thread closed; the ticket then ends unless its work has not finished (see `Tickets.unfinished`).
  */
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
-export interface Execution { name: string; directory: string; assignment: string }
+export interface ExecutionPlan {
+  repositoryId: string; repository: string; defaultBranch?: string; executorProfileId: string; accessProfileId: string; configurationRevision?: number
+  model: { provider: string; model: string; reasoningEffort?: string } | null
+  directory: string; prepare: string; blockedCommands: string[]; createdAt: string; preparedAt?: string
+}
+export interface Execution { name: string; directory: string; assignment: string; plan?: ExecutionPlan }
 
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended

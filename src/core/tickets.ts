@@ -41,7 +41,7 @@ export class Tickets extends EnginePart {
     const primary = this.repo.triggers.get(evaluation.primary ?? triggerIds.at(-1)!)
     const origin = { triggerId: primary?.id ?? triggerIds[0]!, triggerIds }
     let ticket: Ticket = { id, title: outcome.title, decisionId, mandate, channels: [], assignments: [], inputs: [], undelivered: [],
-      createdAt: at, updatedAt: at, origin }
+      createdAt: at, updatedAt: at, origin, ...(mandate.repository ? { repository: mandate.repository } : {}), ...(outcome.routing ? { routing: outcome.routing } : {}) }
     for (const triggerId of triggerIds) {
       const channel = this.repo.triggers.get(triggerId)?.channel
       if (channel && !ticket.channels.some(item => sameChannel(item, channel))) ticket.channels.push(channel)
@@ -103,12 +103,19 @@ export class Tickets extends EnginePart {
    * The Trigger to attach to a ticket, once the ticket may take it.
    * @throws UserError when the trigger or ticket is unknown, a ticket's worker still decides the trigger, a person stopped the ticket, or an ended ticket's Mandate no longer revalidates.
    */
+  /** A follow-up may address the fixed target only while its source still authorizes it. */
+  allowsTrigger(ticket: Ticket, trigger: Trigger): boolean {
+    if (!ticket.repository || !this.policy().resolveTarget) return true
+    try { return this.policy().resolveTarget!({ sourceInstanceId: trigger.source, repository: ticket.repository, meta: trigger.meta }).repository === ticket.repository }
+    catch { return false }
+  }
   attachable(ticketId: string, triggerId: string): Trigger {
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
     // A follow-up that reached a ticket goes elsewhere only once the workers that decide it hand it back.
     this.leftToWorkers(trigger)
     const current = this.require(ticketId)
+    if (!this.allowsTrigger(current, trigger)) throw new UserError('mandateRevoked')
     if (current.ended?.by === 'human') throw new UserError('ticketStopped')
     if (!liveTicket(current) && !this.policy().revalidate(current.mandate)) throw new UserError('mandateRevoked')
     return trigger

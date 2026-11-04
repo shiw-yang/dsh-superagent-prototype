@@ -21,6 +21,7 @@ import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
 import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
+import { workerEnvironmentProblem } from '../executor/plan.ts'
 import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
@@ -50,6 +51,23 @@ import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
 const now = (): string => new Date().toISOString()
+
+/** Preserve a ticket's historical GitHub source even when another instance now listens to that repository. */
+export function ticketGithubSource(ticket: Ticket, instances: { id: string; kind: string; repositoryId?: string; enabled: boolean }[], originSource?: string): string | undefined {
+  if (!ticket.repository) return 'github'
+  const candidates = instances.filter(source => source.kind === 'github' && source.repositoryId === ticket.repository)
+  const ids = new Set(candidates.map(source => source.id))
+  const followed = (ticket.follows ?? []).filter(follow => ids.has(follow.thread.split(':')[0]!))
+  const relevant = ticket.ended ? followed.filter(follow => follow.closed)
+    .sort((a, b) => Number(b.own) - Number(a.own) || b.closed!.at.localeCompare(a.closed!.at))
+    : followed.filter(follow => !follow.closed).sort((a, b) => Number(b.own) - Number(a.own))
+  if (relevant[0]) return relevant[0].thread.split(':')[0]
+  if (originSource && ids.has(originSource)) return originSource
+  if (ticket.routing && ids.has(ticket.routing.sourceInstanceId)) return ticket.routing.sourceInstanceId
+  if (followed.at(-1)) return followed.at(-1)!.thread.split(':')[0]
+  const enabled = candidates.filter(source => source.enabled)
+  return enabled.length === 1 ? enabled[0]!.id : undefined
+}
 
 /**
  * Composition root of dsh-superagent that connects `Store`, `Setup`, `Engine`, `SourceRegistry`, `Effects`, `Outbox`, `Passes`, `Sessions`, `Settings`, `Prompts`, `DshExecutor`, and `MasterAssessor`.
@@ -97,8 +115,13 @@ export class Runtime extends Service implements SourceHost {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
-      const deployed = () => setup.configured()
-        ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
+      const deployed = () => {
+        if (!setup.configured()) return undefined
+        const settings = store.settings()
+        const variables = environmentOf({ deployment: setup.deployment, sources: this.sources, settings })
+        // A global Router has no implicit target when repositories are plural.
+        return Object.keys(settings.repositories).length > 1 ? variables.filter(variable => variable.owner !== 'github') : variables
+      }
       const feishu = () => setup.configured() && !!setup.deployment.feishu
       const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
@@ -112,28 +135,32 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
+      sources.bindAccess({ commands: id => this.commandsFor(id), links: id => this.channelLinksFor(id) })
       const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
+      const executionProblem = (ticket: Ticket) => this.executionProblem(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
+        commandsFor: id => this.commandsFor(id), commandsForRepository: id => this.commandsForRepository(id),
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
-        closing: () => this.closing(), environment,
+        closing: () => this.closing(), environment, executionProblem,
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
-        lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
+        lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, executionProblem, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
-      this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
+      this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands,
+        commandsFor: id => id ? this.commandsForRepository(id) : commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
-      const policy = () => settingsPolicy(store.settings(), sources)
+      const policy = () => settingsPolicy(store.settings(), sources, store.get(KV.settings.revision) ?? 0)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
@@ -148,7 +175,11 @@ export class Runtime extends Service implements SourceHost {
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
-            for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
+            const repository = ended.execution?.plan?.repository
+              ?? (ended.repository ? store.settings().repositories[ended.repository]?.fullName
+                : Object.keys(store.settings().repositories).length ? undefined : setup.deployment.repository)
+            const source = this.githubSourceId(ended)
+            if (repository && source) for (const message of pullEndNotices(ended, request, repository, source)) outbox.send(message)
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
@@ -157,10 +188,12 @@ export class Runtime extends Service implements SourceHost {
       const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects,
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
-        get deployment() { return setup.deployment }, configured: () => setup.configured(),
+        get deployment() { return setup.deployment }, configured: id => setup.configured(id),
+        deploymentFor: id => setup.deploymentFor(id), problemFor: id => setup.problemFor(id), commandsFor: id => this.commandsFor(id),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
+        githubFor: ticket => this.githubFor(ticket),
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
@@ -173,7 +206,47 @@ export class Runtime extends Service implements SourceHost {
   get health(): Readonly<Record<string, Health>> { return this.board.all }
   /** Aborted when dsh-superagent stops or loses its state directory lock, cancelling running reads and subprocesses. */
   get lifetime(): AbortSignal { return this.stopped.signal }
-  context(kind: { kind: string; health: readonly string[] }): SourceContext { return sourceContextOf(this.sourceDeps, kind) }
+  context(kind: { kind: string; id?: string; health: readonly string[] }): SourceContext { return sourceContextOf(this.sourceDeps, kind) }
+  /** Account-bound command runner; a missing repository never falls back to the process-wide default. */
+  private commandsForRepository(id: string): Commands {
+    if (!this.store.settings().repositories[id]) throw new Error(`Unknown repository: ${id}`)
+    return this.commands.forDeployment(() => this.setup.deploymentFor(id))
+  }
+  private commandsFor(id: string): Commands {
+    const instance = this.sources.instance(id)
+    if (!instance) throw new Error(`Unknown source instance: ${id}`)
+    if (instance.repositoryId) return this.commandsForRepository(instance.repositoryId)
+    if (instance.kind === 'github' && Object.keys(this.store.settings().repositories).length) {
+      throw new Error(`GitHub source ${id} has no repository binding`)
+    }
+    return this.commands
+  }
+  private channelLinksFor(id: string) {
+    const instance = this.sources.instance(id)
+    const repository = instance?.repositoryId ? this.store.settings().repositories[instance.repositoryId]?.fullName
+      : this.setup.configured() && instance?.kind === 'github' && !Object.keys(this.store.settings().repositories).length
+        ? this.setup.deployment.repository : undefined
+    const feishu = this.setup.configured() ? this.setup.deployment.feishu : undefined
+    return { ...repository ? { repository } : {}, ...feishu ? { feishu } : {} }
+  }
+  private githubSourceId(ticket: Ticket): string | undefined {
+    return ticketGithubSource(ticket, this.sources.instances(), this.store.triggers.get(ticket.origin.triggerId)?.source)
+  }
+  private githubFor(ticket: Ticket): SourceContext {
+    if (!ticket.repository && Object.keys(this.store.settings().repositories).length) throw new Error('Ticket has no verified repository')
+    const sourceId = this.githubSourceId(ticket)
+    if (!sourceId) throw new Error(`Repository ${ticket.repository} has no unambiguous GitHub source`)
+    return this.context({ id: sourceId, kind: 'github', health: ['github'] })
+  }
+  private executionProblem(ticket: Ticket): string | undefined {
+    if (!this.setup.configured()) return this.setup.problem?.detail ?? 'Waiting for deployment setup'
+    const problem = workerEnvironmentProblem(this.store.settings(), ticket, this.setup.baselineAccessCli, this.setup.baselineBlockedCommands)
+    if (problem) return problem
+    if (ticket.repository && !this.setup.configured(ticket.repository)) {
+      return this.setup.problemFor(ticket.repository)?.detail ?? `Repository ${ticket.repository} is unavailable`
+    }
+    return undefined
+  }
   /** Resolved deployment; throws while waiting for setup (`!configured()`). */
   get deployment(): Deployment { return this.setup.deployment }
   configured(): boolean { return this.setup.configured() }
@@ -187,8 +260,9 @@ export class Runtime extends Service implements SourceHost {
   }
   ticketEnvironment(ticket: Ticket): Variable[] {
     const trigger = sourceTrigger(this, ticket)
-    const { setup: { deployment }, sources } = this
-    return ticketEnvironment({ deployment, sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
+    if (!this.setup.configured(ticket.repository)) return []
+    const deployment = this.setup.deploymentFor(ticket.repository)
+    return ticketEnvironment({ deployment, sources: this.sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
   }
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
@@ -201,11 +275,12 @@ export class Runtime extends Service implements SourceHost {
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
+    // Restore guards on persisted/loaded workers even when deployment setup is unavailable.
+    await this.sessions.install()
     if (!await this.setup.run(this.store.settings())) {
       this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
       return
     }
-    this.sessions.install()
     this.executor.install()
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
@@ -223,6 +298,7 @@ export class Runtime extends Service implements SourceHost {
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
+      executionProblem: ticket => runtime.executionProblem(ticket),
       checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
   }
   /** Idempotent stop; concurrent or repeated calls share the same shutdown promise. */

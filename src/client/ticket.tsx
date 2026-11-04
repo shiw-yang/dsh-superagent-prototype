@@ -4,6 +4,7 @@ import { ApiError, usePoll, type TicketPageView } from './api.ts'
 import { DisclosureRow, Dot, Icon, Tag, type IconName } from './controls.tsx'
 import { decisionMark, reportDot, ticketMark } from './marks.ts'
 import { usePanel } from './provider.tsx'
+import { RepositoryBadge } from './topology.tsx'
 import { settingsRoute } from './route.ts'
 import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
 import { actorName, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
@@ -136,10 +137,15 @@ export function TicketPage({ id }: { id: string }) {
     {error && <LoadState error={error} loading={false} />}
     <div className="dt-row-meta dt-status-line">
       <StageMark state={status.dot} icon={status.icon} label={status.label} />
+      <RepositoryBadge repository={data.repository} />
       <LabelValue label={t('ticketMandateLabel')} value={valueLabel(t, 'strength', data.mandate.strength)} />
       <LabelValue label={t('ticketActorLabel')} value={`${valueLabel(t, 'source', data.mandate.actor.source)} · ${actor}`} />
       <LabelValue label={t('ticketUpdatedLabel')} value={when(data.updatedAt, t('lang'))} />
     </div>
+    {data.repository && data.repositoryEnabled === false && <p className="dt-banner" role="status">{t('lang') === 'zh'
+      ? '目标仓库已停用或移除；新的执行已被阻止。' : 'The target repository is disabled or removed; new execution is blocked.'}</p>}
+    {'executionProblem' in data && typeof data.executionProblem === 'string' && data.executionProblem
+      && <p className="dt-banner dt-danger" role="status">{data.executionProblem}</p>}
     {ended && <Hint>{ended}</Hint>}
     {data.attention && <div className="dt-banner"><span className="dt-banner-label">{t('attentionPrefix')}</span><MarkdownLite
       text={data.attention.question} />

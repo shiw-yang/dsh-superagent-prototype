@@ -1,4 +1,5 @@
 /** Proactive candidate assessment for the main Session: relays candidate cards, serves bounded context reads, and records outcomes. */
+import { resolveTarget } from '../repositories.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import { reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type EngineForMainSession,
@@ -25,6 +26,7 @@ export const AssessmentSchema = z.object({
       'Duplicate rule assessment IDs').describe('One per enabled rule.'),
   direction: AdmissionDirectionSchema.describe('Required for every decision.'),
   title: z.string().min(1).max(160),
+  repository: z.string().regex(/^[a-z][a-z0-9-]*$/).optional().describe('Stable repository ID selected from the candidate routing allowlist.'),
   worktree_name: WorktreeNameSchema.optional(),
   scope: z.string().max(1500),
   intent_evidence: z.string().trim().min(1).max(700).nullish().describe('For acceptance: the quotes that establish the three facts.'),
@@ -50,6 +52,7 @@ export interface AssessorHost {
   /** Active evaluations in `Engine` that the assessor reads and decides. */
   readonly engine: Pick<EngineForMainSession, 'candidate' | 'candidateDelivered' | 'decide'>
   readonly commands: Commands
+  commandsFor?(repositoryId?: string): Commands
   readonly deployment: Deployment
   /** Durable effect queue through which candidate assessments are delivered. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
@@ -66,6 +69,7 @@ export interface AssessorHost {
 /** Schema for bounded context or repository read requests during an active evaluation (`orchestrator_eval_read`). */
 export const EvalReadSchema = z.object({
   trigger_id: z.string().min(1).describe('Original candidate ID returned by orchestrator_eval; every reference is scoped to this trigger.'),
+  repository: z.string().regex(/^[a-z][a-z0-9-]*$/).optional().describe('Allowed repository ID for file/directory reads; omit to use source/default routing.'),
   resource: z.enum(['message', 'root', 'parent', 'thread', 'file', 'directory', 'image']),
   path: z.string().optional().describe('Repository-relative path, only for file/directory.'),
   message_id: z.string().optional().describe('Only for message: omit for the trigger, or the id of a window message or stub.'),
@@ -206,7 +210,11 @@ export class MasterAssessor implements Assessor {
     })() : { error: error ?? 'Call orchestrator_eval to load initial context', complete: false }
     const settings = this.host.settings()
     const others = candidate.triggers.filter(item => item.id !== trigger.id)
+    const instance = settings.sources[trigger.source]
+    const allowed = (instance?.kind ?? trigger.source) === 'github' ? [instance?.repositoryId].filter((id): id is string => !!id) : instance?.routing?.allowedRepositoryIds ?? []
     return { trigger_id: trigger.id, strength: candidate.strength, mode: settings.eval.mode,
+      routing: { sourceInstanceId: trigger.source, ...((instance?.repositoryId ?? instance?.routing?.defaultRepositoryId) ? { defaultRepositoryId: instance?.repositoryId ?? instance?.routing?.defaultRepositoryId } : {}),
+        repositories: allowed.filter(id => settings.repositories[id]?.enabled).map(id => ({ id, name: settings.repositories[id]!.name, fullName: settings.repositories[id]!.fullName })) },
       source: { kind: trigger.source, actor: trigger.actor.id, thread: threadKey(trigger.threads[0]!), ...(trigger.url
         ? { url: trigger.url } : {}) },
       ...cut(trigger.text, TRIGGER_CHARS), ...imageIds(source?.messageId ?? '', trigger.text),
@@ -237,7 +245,9 @@ export class MasterAssessor implements Assessor {
         const key = read.image_id!.slice(read.image_id!.indexOf('/') + 1)
         return source.image(agent, commands, image, key, this.host.deployment.stateDir, signal)
       }
-      const cacheKey = JSON.stringify([read.resource, read.path, read.cursor, read.message_id])
+      const target = read.resource === 'file' || read.resource === 'directory'
+        ? resolveTarget(this.host.settings(), { sourceInstanceId: trigger.source, repository: read.repository, meta: trigger.meta }) : {}
+      const cacheKey = JSON.stringify([read.resource, target.repository, read.path, read.cursor, read.message_id])
       if (read.offset > 0) {
         const cached = snapshots.get(cacheKey)
         if (cached === undefined) throw new Error('Read this resource at offset 0 first')
@@ -263,7 +273,9 @@ export class MasterAssessor implements Assessor {
         body = JSON.stringify({ images: references, next_read: next, ...result.body })
       }
       else {
-        body = await readRepositoryPath(commands, read.path!, read.resource === 'directory' ? 'directory' : 'file')
+        if (target.repository && !this.host.commandsFor) throw new Error('Repository-scoped assessment commands are unavailable')
+        const scoped = target.repository ? this.host.commandsFor!(target.repository).withSignal(signal) : commands
+        body = await readRepositoryPath(scoped, read.path!, read.resource === 'directory' ? 'directory' : 'file')
       }
       snapshots.set(cacheKey, body)
       return textPage(read.resource, body, read.offset, 4000)

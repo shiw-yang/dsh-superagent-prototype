@@ -9,6 +9,27 @@ import { usePanel, mount, remount, settle, all, find, tab, click, type, text, fi
 import { server } from './fixtures/panel-server.ts'
 
 usePanel()
+it('offers every available provider even when a different provider is already selected', async () => {
+  server.settings.executor.model = { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'off' }
+  server.models = { default: { provider: 'oauth-codex', model: 'gpt-6.1-terra' }, routableProviders: ['deepseek-official', 'oauth-codex'],
+    failures: [], groups: [{ id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-flash', name: 'Flash' }] },
+      { id: 'oauth-codex', name: 'Codex', models: [{ id: 'gpt-6.1-terra', name: 'GPT',
+        reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] }
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  expect(text()).toContain('oauth-codex / gpt-6.1-terra')
+  const providers = field<HTMLSelectElement>('选择服务商')
+  expect([...providers.options].map(option => option.value)).toContain('oauth-codex')
+  await type(providers, 'oauth-codex')
+  expect(field<HTMLInputElement>(zh.modelProvider).value).toBe('oauth-codex')
+  expect(field<HTMLInputElement>(zh.modelName).value).toBe('')
+  expect(field<HTMLInputElement>(zh.modelEffort).value).toBe('')
+  await type(field<HTMLSelectElement>(zh.chooseModel), 'gpt-6.1-terra')
+  await type(field<HTMLSelectElement>(zh.chooseEffort), 'high')
+  await click(zh.save)
+  expect(server.settings.executor.model).toEqual({ provider: 'oauth-codex', model: 'gpt-6.1-terra', reasoningEffort: 'high' })
+})
 it('keeps a person\'s own value where another save changed the same setting, and says so', async () => {
   await mount()
   await click(zh['tab.execution'])
@@ -51,7 +72,7 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   const [workerProvider, workerModel, effort] = all('.dt-model input')
   await type(workerProvider as HTMLInputElement, 'worker-provider'); await type(workerModel as HTMLInputElement,
     'worker-model'); await type(effort as HTMLInputElement, 'high')
-  expect([...document.querySelectorAll('#dt-worker-model-efforts option')].map(option => option.getAttribute('value'))).toEqual(['high'])
+  expect([...field<HTMLSelectElement>(zh.chooseEffort).options].map(option => option.value)).toEqual(['', 'high'])
   await click(zh.save)
   expect(server.settings.executor).toEqual({ maxWorkers: 5, directory: '/srv/work',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',

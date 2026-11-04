@@ -97,8 +97,8 @@ export const githubKind: SourceKind<GithubConfig> = {
       { key: 'DSH_SUPERAGENT_GITHUB_NUMBER', description: { zh: '接下工单的 Issue 或 PR 编号；工单不是从 GitHub 来的时为空', en: 'Number of the Issue or PR that started the ticket; empty when the ticket did not start on GitHub' } },
       { key: 'DSH_SUPERAGENT_GITHUB_PR_HEAD', description: { zh: '接下工单的 PR 的 head 引用 refs/pull/<编号>/head；不是 PR 时为空', en: 'Head ref refs/pull/<number>/head of the PR that started the ticket; empty when it was not a PR' } },
     ],
-    values: ({ deployment, trigger }) => {
-      const number = trigger?.threads[0]?.source === SOURCE ? Number(trigger.meta.number) || 0 : 0
+    values: ({ deployment, trigger, sourceId = SOURCE }) => {
+      const number = trigger?.source === sourceId ? Number(trigger.meta.number) || 0 : 0
       return { DSH_SUPERAGENT_GITHUB_REPOSITORY: deployment.repository, DSH_SUPERAGENT_GITHUB_ACCOUNT: deployment.github.login, DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL: deployment.github.noreply, DSH_SUPERAGENT_GITHUB_NUMBER: number ? String(number) : '',
         DSH_SUPERAGENT_GITHUB_PR_HEAD: number && trigger?.meta.isPr === true ? `refs/pull/${number}/head` : '' }
     },
@@ -112,12 +112,14 @@ export const inject = ['orchestrator']
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.orchestrator.sources.register(githubKind), 'github: source kind')
   ctx.effect(() => {
-    const source = sourceContext(ctx.orchestrator, githubKind)
     const controller = new AbortController()
-    // Unhandled rejections terminate the DSH process, so a failure escaping the polling loop is reported as source health instead.
-    const running = watch(source, controller.signal)
-      .catch((error: unknown) => { source.report('github', { state: 'error', detail: String(error) }) })
-    return async () => { controller.abort(); await running }
+    // Each repository owns an independent loop and error boundary.
+    const running = ctx.orchestrator.sources.instances().filter(instance => instance.installed && instance.kind === SOURCE).map(instance => {
+      const source = sourceContext(ctx.orchestrator, { ...githubKind, id: instance.id })
+      return watch(source, controller.signal)
+        .catch((error: unknown) => { source.report('github', { state: 'error', detail: String(error) }) })
+    })
+    return async () => { controller.abort(); await Promise.all(running) }
   })
 }
 /** Returns an error health once `failures` consecutive polls fail, or undefined so a single network interruption stays quiet. */
@@ -129,7 +131,7 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   let failures = 0
   await ctx.ready
   // Setup restarts dsh-superagent once it resolves the accounts; until then nothing is polled.
-  if (!ctx.configured()) { ctx.report('github', health('paused', 'setupPending')); return }
+  if (!ctx.configured()) { ctx.report('github', ctx.problem ? { state: 'error', detail: ctx.problem.detail } : health('paused', 'setupPending')); return }
   while (!signal.aborted) {
     const config = ctx.config<GithubConfig>(SOURCE)
     try {
@@ -154,6 +156,12 @@ const newRound = (signal?: AbortSignal): Round => ({ started: new Date().toISOSt
 const stopped = (ctx: SourceContext, round: Round): boolean => !!round.signal?.aborted || !ctx.config(SOURCE)
 export interface Retry { since: string; pr: boolean; failedAt?: string; attempts?: number }
 const RETRY_WINDOW_MS = 24 * 3600_000
+/**
+ * How far before the notification cursor a notified Issue or PR is read. GitHub can update a notification a moment after
+ * the comment it names, by which time a poll may have moved the cursor past that comment; reading a bounded look-back
+ * recovers it, and Trigger ids make comments already taken in a no-op.
+ */
+const NOTIFICATION_LOOKBACK_MS = 5 * 60_000
 /** True when GitHub returns HTTP 410 (Gone); HTTP 404 is retried because it can indicate revoked access to a private repository. */
 const deleted = (error: unknown): boolean => error instanceof CliError && error.code === 410
 /** Records a failed read on the Thread and in the round; deleted (410) or abandoned (24h+) threads do not fail the round. */
@@ -315,12 +323,18 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
   const retries = { ...state.get(KV.github.retries) }
   // Failed items from the previous round run first, followed by newly notified items in chronological order; each is read once.
   const items = new Map(Object.entries(retries).map(([number, retry]) => [Number(number), retry]))
+  // A notification can report a comment the cursor already passed, because GitHub updates it after the poll that set the
+  // cursor; read notified threads a bounded time before the cursor too. Trigger ids dedupe anything read twice.
+  const cursorMs = Date.parse(since)
+  const lookback = Number.isFinite(cursorMs) ? new Date(cursorMs - NOTIFICATION_LOOKBACK_MS).toISOString() : since
   for (const notification of notifications.reverse()) {
     if (!sameName(notification.repository.full_name, repository)) continue
     const address = githubAddress(notification.subject.url ?? '', repository)
     if (!address || address.discussion || items.has(address.number)) continue
     const { number, pr } = address
-    items.set(number, { since: [state.get(KV.github.cursor(number)) ?? since, since].sort().at(-1)!, pr })
+    const previous = state.get(KV.github.cursor(number))
+    const floor = previous !== undefined && Date.parse(previous) <= Date.parse(lookback) ? previous : lookback
+    items.set(number, { since: floor, pr })
   }
   for (const [number, item] of items) {
     if (stopped(ctx, round)) return { count: notifications.length, interval }
@@ -402,7 +416,7 @@ async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, r
   }
 }
 export async function pollTicketPulls(ctx: SourceContext, signal?: AbortSignal, round = newRound(signal)): Promise<void> {
-  const numbers = [...new Set(ctx.tickets.open().flatMap(ticket => pullsOf(ticket, true)))]
+  const numbers = [...new Set(ctx.tickets.open().flatMap(ticket => pullsOf(ticket, true, ctx.id ?? SOURCE)))]
   for (const number of numbers) {
     if (stopped(ctx, round)) return
     try {

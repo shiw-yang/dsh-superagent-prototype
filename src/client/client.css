@@ -223,6 +223,17 @@ div.dt-preview-head { color: var(--dsw-alias-label-secondary); }
 .dt-input input::placeholder { color: var(--dsw-alias-label-dimmed); }
 .dt-input input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
 .dt-field .dt-input, .dt-search .dt-input, .dt-add-skill .dt-input { display: flex; width: 100%; }
+.dt-model-choice { position: relative; display: flex; min-width: 0; border: 0.5px solid var(--dsw-alias-border-l4); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); }
+.dt-model-choice:focus-within { border-color: var(--dsw-alias-brand-primary); }
+.dt-model-choice .dt-input { flex: 1; min-width: 0; height: 31px; padding-right: 32px; border: 0; background: transparent; }
+.dt-model-choice select { position: absolute; top: 0; right: 0; bottom: 0; width: 32px; border: 0; border-radius: 0 8px 8px 0; appearance: none; background: transparent; color: var(--dsw-alias-label-primary); font-size: 0; cursor: pointer; }
+.dt-model-choice select:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.dt-model-choice select option { font-size: 14px; }
+.dt-model-choice select:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
+.dt-model-choice-chevron { position: absolute; right: 8px; top: 50%; display: flex; transform: translateY(-50%); color: var(--dsw-alias-label-tertiary); pointer-events: none; }
+.dt-model-choice-chevron svg { width: 14px; height: 14px; }
+.dt-model-choice select:disabled { cursor: default; }
+.dt-model-choice select:disabled + .dt-model-choice-chevron { opacity: .35; }
 .dt-switch { box-sizing: border-box; flex: 0 0 auto; width: 36px; height: 20px; padding: 2px; border: 0; border-radius: 10px; background: var(--dsw-alias-border-l3); cursor: pointer; }
 .dt-switch[aria-checked='true'] { background: var(--dsw-alias-brand-primary); }
 .dt-switch:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
