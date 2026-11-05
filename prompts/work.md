@@ -47,3 +47,10 @@ Call orchestrator_report with progress, ready, blocked, failed or dropped; inclu
 Omit pr_number or use null if no PR exists; never fill it with a placeholder such as 1.
 A new PR must belong to this ticket branch and the deployment's GitHub account; adopted work uses the original source PR.
 ready means reviewed implementation with relevant checks passed.
+
+Verification:
+- Derive checks from the original request and explicit constraints, without expanding scope.
+- Include verification with ready and useful progress/blocked/failed results: a complete snapshot, not a patch. Give each criterion's passed/failed/not_run status, actual procedure and observed result (or why not run), and real evidence URLs when available; without links, record observations in method/notes. Never invent runs or evidence.
+- Name the tested SHA/artifact revision; distinguish uncommitted work from that commit and identify a reproducible artifact if available. If unknown, omit revision and explain why.
+- Repair actionable failures before ready; after code/requirements change rerun affected checks and submit a new snapshot. Mark missing checks/environments not_run and unverified; command success alone does not establish the requested outcome.
+- Snapshots are worker testimony for that revision, not current-head proof or independent acceptance. Cite actual CI/review links and revisions; never imply host verification.

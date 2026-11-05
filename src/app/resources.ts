@@ -34,6 +34,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'ticket/<id>/assignments', holds: 'its assignments, newest first, with the start of each report', executor: true },
   { name: 'ticket/<id>/inputs', holds: 'its inputs, newest first', executor: true },
   { name: 'ticket/<id>/result', holds: 'its latest report', executor: true },
+  { name: 'ticket/<id>/verification', holds: 'worker-reported verification snapshots, newest first, with tested revisions, checks, evidence and limitations; not independent acceptance or confirmation of the current head', executor: true },
   { name: 'ticket/<id>/report/<id>', holds: 'the report of one of its assignments', executor: true },
   { name: 'ticket/<id>/transcript', holds: 'its Executor Session\'s messages, newest first', executor: true },
   { name: 'ticket/<id>/message/<n>', holds: 'one message of that transcript', executor: true },
@@ -280,6 +281,8 @@ const ROUTES: readonly Route[] = [
     } else if (part !== undefined) throw new Error('Unknown context resource')
     else if (section === 'assignment') body = ticket.execution?.assignment ?? ''
     else if (section === 'result') body = latestReport(ticket)?.summary ?? ''
+    else if (section === 'verification') body = JSON.stringify({ reported_by: 'worker',
+      current_revision_checked: false, reports: [...ticket.verificationReports ?? []].reverse() })
     else if (section === 'transcript') {
       body = (await transcript(host, id)).flatMap((event, index) => {
         const entry = transcriptEntry(event)

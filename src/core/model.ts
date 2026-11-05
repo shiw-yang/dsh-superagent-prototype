@@ -214,6 +214,28 @@ export type AssignmentState = 'pending' | 'running' | 'ended'
  * ready (`ready`), a person must act to unblock or recover it (`blocked` or `failed`), or nothing is left to do (`dropped`).
  */
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
+/** Evidence supplied by a worker, not an independent acceptance or a host-observed CI result. */
+export interface Verification {
+  /** Exact tested commit/revision; absent means the worker did not identify a version. */
+  revision?: string
+  checks: {
+    criterion: string
+    status: 'passed' | 'failed' | 'not_run'
+    /** Command or concrete procedure, including what was observed (or why it was not run). */
+    method: string
+    evidence?: { label: string; url: string }[]
+    notes?: string
+  }[]
+  unverified?: string[]
+}
+/** Append-only verification snapshot; later work never silently updates evidence for an earlier revision. */
+export interface VerificationReport {
+  assignmentId: string
+  at: string
+  state: ReportState
+  summary: string
+  verification: Verification
+}
 /** Binding between a ticket and one executor instance. */
 export interface Assignment {
   id: string
@@ -286,6 +308,8 @@ export interface Ticket {
   /** Open question for a person; cleared by the executor, by a person's message that reaches the ticket, or when the ticket ends. */
   attention?: Attention
   assignments: Assignment[]
+  /** Worker-reported verification history, oldest first; legacy tickets have none. */
+  verificationReports?: VerificationReport[]
   inputs: TicketInput[]
   /** Inputs not yet handed to a running assignment. */
   undelivered: string[]

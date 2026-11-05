@@ -65,7 +65,9 @@ export function ticketDetails(ticket: Ticket, threads: TicketThread[], batch: re
     scope: ticket.mandate.scope, requested_by: ticket.mandate.actor.id,
     assignments: newestPage(ticket.assignments, 0, ASSIGNMENTS, item => assignmentLine(ticket, item), `ticket/${ticket.id}/assignments`),
     inputs: newestPage(ticket.inputs, 0, INPUTS, input => inputLine(ticket, input, worker), `ticket/${ticket.id}/inputs`),
-    assignment: `ticket/${ticket.id}/assignment`, result: `ticket/${ticket.id}/result`, transcript: `ticket/${ticket.id}/transcript` }
+    assignment: `ticket/${ticket.id}/assignment`, result: `ticket/${ticket.id}/result`, transcript: `ticket/${ticket.id}/transcript`,
+    ...ticket.verificationReports?.length ? { verification: { reported_by: 'worker', count: ticket.verificationReports.length,
+      read: `ticket/${ticket.id}/verification` } } : {} }
 }
 
 export function threadCard(thread: Thread, label: string) {
