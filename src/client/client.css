@@ -41,6 +41,28 @@
 /* Transparent block borders preserve vertical spacing when line clamping clips padding. */
 .dt-banner:is(.dt-clamp, .dt-clamp-8) { padding-block: 0; border-block: 8px solid transparent; }
 .dt-banner-label { font-weight: 500; }
+/* Verification reports: short first read, complete testimony behind disclosures. */
+.dt-verification-snapshot, .dt-report-summary, .dt-report-text { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
+.dt-report-conclusion, .dt-report-label { font-weight: 500; }
+.dt-report-summary .dt-plain-list { margin-block: 2px; }
+.dt-verification-counts { padding-block: 4px; }
+.dt-verification-checks { list-style: none; padding: 0; margin: 0; }
+.dt-check-title { display: flex; align-items: flex-start; gap: 8px; min-width: 0; width: 100%; }
+.dt-check-title .dt-tag { flex: none; }
+.dt-check-criterion { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.dt-verification-checks .dt-disclosure-title { min-width: 0; overflow: visible; white-space: normal; }
+.dt-verification-limitations { padding-block: 6px; font-size: 13px; line-height: 20px; }
+.dt-verification-limitations .dt-plain-list { margin-block: 4px; }
+.dt-verification-details { border-top: 0.5px solid var(--dsw-alias-border-l3); }
+.dt-report-copy { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
+.dt-report-copy .dt-mono { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.dt-verification-snapshot .dt-kv { grid-template-columns: minmax(0, 140px) minmax(0, 1fr); }
+@container (max-width: 520px) {
+  .dt-check-title { flex-wrap: wrap; }
+  .dt-check-criterion { flex-basis: 100%; }
+  .dt-verification-snapshot .dt-kv { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .dt-verification-snapshot .dt-kv dd { margin-bottom: 8px; }
+}
 .dt-banner .dt-md { display: inline; }
 .dt-banner .dt-md > p:first-child { display: inline; }
 .dt-row-buttons { position: relative; z-index: 1; gap: 8px; margin-top: 4px; }

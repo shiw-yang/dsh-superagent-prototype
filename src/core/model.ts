@@ -214,6 +214,12 @@ export type AssignmentState = 'pending' | 'running' | 'ended'
  * ready (`ready`), a person must act to unblock or recover it (`blocked` or `failed`), or nothing is left to do (`dropped`).
  */
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
+/** Short human-facing report, separate from the complete technical summary and evidence. */
+export interface ReportBrief {
+  conclusion: string
+  blockers?: string[]
+  nextSteps?: string[]
+}
 /** Evidence supplied by a worker, not an independent acceptance or a host-observed CI result. */
 export interface Verification {
   /** Exact tested commit/revision; absent means the worker did not identify a version. */
@@ -234,6 +240,7 @@ export interface VerificationReport {
   at: string
   state: ReportState
   summary: string
+  brief?: ReportBrief
   verification: Verification
 }
 /** Binding between a ticket and one executor instance. */
@@ -244,7 +251,7 @@ export interface Assignment {
   startedAt?: string
   endedAt?: string
   endedReason?: string
-  report?: { state: ReportState; summary: string; at: string }
+  report?: { state: ReportState; summary: string; at: string; brief?: ReportBrief }
   /** When Inputs last reached the worker; one at or after `report.at` means the worker has been busy with Inputs since that report. */
   deliveredAt?: string
   /**

@@ -214,6 +214,37 @@ it('words an ended Ticket by its outcome, on its row and its page, with a person
   expect(all('.dt-hint').map(hint => hint.textContent).find(line => line?.includes(en['outcome.stopped']))).toMatch(/Stopped by a person: 不需要了$/)
 })
 
+it('bounds the current blocked banner and retains its full legacy text on demand', async () => {
+  const summary = `${'Detailed blocker '.repeat(100)}BLOCKER END`
+  server.ticketDetails.t1 = { ...server.ticketDetails.t1!, stage: 'person', action: 'blocked', summary,
+    actions: { retry: true, stop: true } }
+  at({ page: 'execution', id: 't1' })
+  await mount(en)
+  const banner = document.querySelector<HTMLElement>('.dt-banner')!
+  expect(banner.textContent).not.toContain('BLOCKER END')
+  expect(banner.querySelector('.dt-event-text')?.textContent?.length).toBe(161)
+  await click(banner.querySelector<HTMLElement>('button')!)
+  expect(banner.textContent).toContain(summary)
+})
+
+it('uses the current assignment brief in the blocked banner, never a stale brief for a different summary', async () => {
+  const ticket = server.ticketDetails.t1!
+  const summary = 'Full blocker details '.repeat(50)
+  server.ticketDetails.t1 = { ...ticket, stage: 'person', action: 'blocked', summary, actions: { retry: true, stop: true },
+    assignments: [{ ...ticket.assignments[0]!, report: { state: 'blocked', at: '2026-09-22T00:05:00Z', summary,
+      brief: { conclusion: 'Need a test account', blockers: ['Account unavailable'], nextSteps: ['Provide account'] } } }] }
+  at({ page: 'execution', id: 't1' })
+  await mount(en)
+  expect(document.querySelector('.dt-banner')?.textContent).toContain('Need a test account')
+  expect(document.querySelector('.dt-banner')?.textContent).not.toContain(summary)
+  await click(en.reportOriginal)
+  expect(document.querySelector('.dt-banner')?.textContent).toContain(summary)
+  server.ticketDetails.t1 = { ...server.ticketDetails.t1!, summary: 'A newer unrelated blocker' }
+  await remount(en)
+  expect(document.querySelector('.dt-banner')?.textContent).toContain('A newer unrelated blocker')
+  expect(document.querySelector('.dt-banner')?.textContent).not.toContain('Need a test account')
+})
+
 it('sends one stop for a double click on Confirm', async () => {
   at({ page: 'execution', id: 't1' })
   await mount()
