@@ -74,36 +74,101 @@ function evidenceUrl(value: string): string | undefined {
   } catch { return undefined }
 }
 
+// Previews preserve the original words; no client-generated semantic summary.
+function preview(text: string, limit = 160): string {
+  const chars = Array.from(text.replace(/\s+/g, ' ').trim())
+  return chars.length > limit ? `${chars.slice(0, limit).join('')}…` : chars.join('')
+}
+function ReportText({ text }: { text: string }) {
+  const { t } = usePanel()
+  const [open, setOpen] = useState(false)
+  const shortened = preview(text)
+  const expandable = shortened !== text
+  return <div className="dt-report-text">
+    <div className="dt-event-text">{open ? text : shortened}</div>
+    {expandable && <button type="button" className="dt-textlink dt-more" aria-expanded={open}
+      onClick={() => setOpen(!open)}>{t(open ? 'collapse' : 'reportShowFull')}</button>}
+  </div>
+}
+function ReportSummary({ summary, brief }: { summary: string; brief?: VerificationReport['brief'] }) {
+  const { t } = usePanel()
+  return <div className="dt-report-summary">{brief ? <>
+    <div className="dt-report-conclusion">{brief.conclusion}</div>
+    {brief.blockers?.length ? <div><span className="dt-report-label">{t('reportBlockers')}</span>
+      <ul className="dt-plain-list">{brief.blockers.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}
+    {brief.nextSteps?.length ? <div><span className="dt-report-label">{t('reportNextSteps')}</span>
+      <ul className="dt-plain-list">{brief.nextSteps.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}
+    <Details icon="message" title={t('reportOriginal')}><div className="dt-event-text">{summary}</div></Details>
+  </> : <ReportText text={summary} />}</div>
+}
+function CopyValue({ value, label }: { value: string; label: string }) {
+  const { t } = usePanel()
+  const [state, setState] = useState<'idle' | 'copying' | 'copied' | 'failed'>('idle')
+  const copy = async () => {
+    setState('copying')
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable')
+      await navigator.clipboard.writeText(value)
+      setState('copied')
+    } catch { setState('failed') }
+  }
+  return <div className="dt-report-copy"><span className="dt-mono">{value}</span>
+    <button type="button" className="dt-textlink dt-more" aria-label={t('reportCopyValue', { label })}
+      disabled={state === 'copying'} onClick={() => { void copy() }}>{t('reportCopy')}</button>
+    <span role="status" className={state === 'failed' ? 'dt-error' : 'dt-hint'}>
+      {state === 'copied' ? t('reportCopied') : state === 'failed' ? t('reportCopyFailed') : ''}</span>
+  </div>
+}
 function VerificationSnapshot({ report }: { report: VerificationReport }) {
   const { t } = usePanel()
   const { verification } = report
-  return <>
-    <div className="dt-row-meta"><Tag tone="neutral">{t('verificationWorker')}</Tag>
-      <span>{t('assignmentReportShort', { state: valueLabel(t, 'report', report.state) })}</span></div>
-    <p>{report.summary}</p>
-    <KeyValues rows={[
-      [t('verificationRevision'), <span className="dt-mono">{verification.revision || t('verificationRevisionMissing')}</span>],
-      [t('verificationReportedAt'), <When at={report.at} />],
-      [t('verificationAssignment'), <span className="dt-mono">{report.assignmentId}</span>],
-    ]} />
-    {verification.checks.length ? <ul className="dt-list">{verification.checks.map((check, index) => <li key={index} className="dt-row">
-      <div className="dt-row-main">
-        <div className="dt-row-title"><Tag tone={check.status === 'passed' ? 'success' : check.status === 'failed' ? 'danger' : 'neutral'}>
-          {t(`verificationStatus.${check.status}`)}</Tag> {check.criterion}</div>
+  const priority = { failed: 0, not_run: 1, passed: 2 }
+  const checks = verification.checks.map((check, index) => ({ check, index }))
+    .sort((a, b) => priority[a.check.status] - priority[b.check.status])
+  return <div className="dt-verification-snapshot">
+    <div className="dt-row-meta"><span>{t('verificationLast', { state: valueLabel(t, 'report', report.state) })}</span>
+      <span aria-hidden="true">·</span><When at={report.at} /></div>
+    <ReportSummary summary={report.summary} brief={report.brief} />
+    <div className="dt-row-meta dt-verification-counts"><span>{t('verificationCheckCount', { count: checks.length })}</span>
+      {(['failed', 'not_run', 'passed'] as const).map(status => <span key={status}>{t(`verificationStatus.${status}`)} · {
+        checks.filter(({ check }) => check.status === status).length}</span>)}
+    </div>
+    {checks.length ? <ul className="dt-verification-checks">{checks.map(({ check, index }) => <li key={index}>
+      <Details icon="queue" title={<span className="dt-check-title">
+        <Tag tone={check.status === 'failed' ? 'danger' : check.status === 'not_run' || check.notes ? 'warning' : 'success'}>
+          {check.status === 'passed' && check.notes ? t('verificationPassedLimited') : t(`verificationStatus.${check.status}`)}</Tag>
+        <span className="dt-check-criterion">{preview(check.criterion)}</span>
+      </span>}>
         <KeyValues rows={[
-          [t('verificationMethod'), check.method],
-          ...(check.notes ? [[t('verificationNotes'), check.notes] as [string, ReactNode]] : []),
+          [t('verificationCriterion'), <div className="dt-event-text">{check.criterion}</div>],
+          [t('verificationMethod'), <div className="dt-event-text">{check.method}</div>],
+          ...(check.notes ? [[t('verificationNotes'), <div className="dt-event-text">{check.notes}</div>] as [string, ReactNode]] : []),
           ...(check.evidence?.length ? [[t('verificationEvidence'), <ul className="dt-plain-list">{check.evidence.map((item, evidenceIndex) => {
             const href = evidenceUrl(item.url)
             return <li key={evidenceIndex}>{href ? <ExternalLink href={href}>{item.label}</ExternalLink> : <span>{item.label}</span>}</li>
           })}</ul>] as [string, ReactNode]] : []),
         ]} />
-      </div>
+      </Details>
     </li>)}</ul> : <Hint>{t('verificationChecksEmpty')}</Hint>}
-    <KeyValues rows={[[t('verificationLimitations'), verification.unverified?.length
-      ? <ul className="dt-plain-list">{verification.unverified.map((item, index) => <li key={index}>{item}</li>)}</ul>
-      : t('verificationLimitationsMissing')]]} />
-  </>
+    <div className="dt-verification-limitations"><span className="dt-report-label">{t('verificationLimitations')} · {
+      verification.unverified?.length ?? 0}</span>
+      {verification.unverified?.length ? <ul className="dt-plain-list">{verification.unverified.map((item, index) =>
+        <li key={index}><ReportText text={item} /></li>)}</ul> : <Hint>{t('verificationLimitationsMissing')}</Hint>}
+    </div>
+    <div className="dt-verification-details">
+      <Details icon="shield" title={<Tag tone="neutral">{t('verificationWorker')}</Tag>}>
+        <Hint>{t('verificationSnapshotNotice')}</Hint>
+      </Details>
+      <Details icon="hash" title={t('verificationTechnical')}>
+        <KeyValues rows={[
+          [t('verificationRevision'), verification.revision ? <CopyValue value={verification.revision} label={t('verificationRevision')} />
+            : t('verificationRevisionMissing')],
+          [t('verificationReportedAt'), <When at={report.at} />],
+          [t('verificationAssignment'), <CopyValue value={report.assignmentId} label={t('verificationAssignment')} />],
+        ]} />
+      </Details>
+    </div>
+  </div>
 }
 
 function VerificationReports({ reports = [] }: { reports?: VerificationReport[] }) {
@@ -113,12 +178,10 @@ function VerificationReports({ reports = [] }: { reports?: VerificationReport[] 
   const [latest, ...earlier] = reports.slice().reverse()
   return <Section title={t('verificationTitle')}>
     {latest ? <>
-      <h3>{t('verificationLatest')}</h3>
-      <Hint>{t('verificationSnapshotNotice')}</Hint>
-      <VerificationSnapshot report={latest} />
+      <VerificationSnapshot key={`${latest.assignmentId}:${latest.at}:${reports.length}`} report={latest} />
       {earlier.length > 0 && <Details icon="queue" title={t('verificationHistory', { count: earlier.length })}>
         {earlier.map((report, index) => <Details key={`${report.assignmentId}:${report.at}:${index}`} icon="hash"
-          title={<>{report.verification.revision || t('verificationRevisionMissing')} · <When at={report.at} /></>}>
+          title={<>{report.verification.revision ? preview(report.verification.revision, 12) : t('verificationRevisionMissing')} · <When at={report.at} /></>}>
           <VerificationSnapshot report={report} />
         </Details>)}
       </Details>}
@@ -186,6 +249,8 @@ export function TicketPage({ id }: { id: string }) {
     return reason ? t('endedAt', { time, outcome, reason }) : t('endedAtShort', { time, outcome })
   })()
   const channel = data.channels[0]
+  const latestReport = data.assignments.at(-1)?.report
+  const currentBrief = latestReport?.summary === data.summary ? latestReport.brief : undefined
   return <>
     <PageHead title={data.title}>
       {opening?.url && <ActionLink href={opening.url}>{t('openThread', { source: valueLabel(t, 'source', opening.source) })}</ActionLink>}
@@ -208,9 +273,10 @@ export function TicketPage({ id }: { id: string }) {
         <ActionLink href={channel.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source', channel.source) })}</ActionLink>
       </div>}</div>}
     {/* Ordinary progress stays in the Session/Channels; only a report that halted work (blocked/failed) is shown here. */}
-    {data.actions.retry && data.summary && <p className={`dt-banner${failed ? ' dt-danger' : ''}${failedText ? ' dt-mono' : ''}`}>
-      <span className="dt-banner-label">{t(failed ? 'failedPrefix' : 'blockedPrefix')}</span>{data.summary}
-    </p>}
+    {data.actions.retry && data.summary && <div className={`dt-banner${failed ? ' dt-danger' : ''}${failedText ? ' dt-mono' : ''}`}>
+      <span className="dt-banner-label">{t(failed ? 'failedPrefix' : 'blockedPrefix')}</span>
+      <ReportSummary key={data.summary} summary={data.summary} brief={currentBrief} />
+    </div>}
     {data.deliveryError && <p className="dt-banner dt-danger dt-mono">
       <span className="dt-banner-label">{t('deliveryFailedPrefix')}</span>{data.deliveryError}
     </p>}

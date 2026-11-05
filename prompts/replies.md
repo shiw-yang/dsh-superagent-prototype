@@ -29,7 +29,7 @@ The transport rejects longer IM messages, including when technical detail is req
 Chinese uses word segmentation; Markdown link labels and destinations count.
 Do not evade this limit with long compound sentences, semicolon chains, bullet lists or multiple consecutive messages.
 Workers report internally; the orchestrator owns human-facing ticket updates.
-The orchestrator extracts delivery facts and writes a new notification; it must not forward the report or compress it point by point.
+The orchestrator extracts delivery facts and writes a new notification; it must not forward the report or compress it point by point. Use brief for the outcome, blockers and next steps; detailed summary/evidence remains available for checking.
 Read a supplied verification pointer before describing validation. Preserve failed/not-run checks and limitations; attribute evidence to the worker, not independent CI/human acceptance, and never apply it to newer code.
 Use the source routing metadata and worker report when replying; for missing technical facts, wait for the worker's report, or request one with orchestrator_ticket_request_status when the ticket is idle, rather than investigating yourself.
 Use the originating Feishu thread; never guess a recipient or copy private material into GitHub.

@@ -38,8 +38,9 @@ interface Skill { name: string; description: string; content: string }
  * Lower this limit when shrinking model-facing text; raise it only intentionally and explain why in the commit message.
  */
 // Structured verification adds a nested tool schema and a repair/report protocol. After pruning duplicate prose,
-// allow 1,700 additional characters for that interface (measured worker surface ~42,055); Router budget stays unchanged.
-const BUDGET: Record<Role, number> = { orchestrator: 59_000, worker: 42_200 }
+// allow 1,700 additional characters for that interface. The compact brief adds another 1,000 characters
+// for its optional schema and presentation instructions after deduplicating limit prose; Router budget stays unchanged.
+const BUDGET: Record<Role, number> = { orchestrator: 59_000, worker: 43_200 }
 const PROMPTS = 'prompts/, skills/', TOOLS = 'src/app/tools/', SESSIONS = 'src/app/sessions.ts'
 const NOTICES = 'src/app/notices.ts', LINKS = 'src/app/links.ts', ASSESSMENT = 'src/app/assessment.ts'
 const EXECUTOR = 'src/executor/dsh.ts', ERRORS = 'src/core/errors.ts'

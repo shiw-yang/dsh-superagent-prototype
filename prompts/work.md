@@ -48,6 +48,10 @@ Omit pr_number or use null if no PR exists; never fill it with a placeholder suc
 A new PR must belong to this ticket branch and the deployment's GitHub account; adopted work uses the original source PR.
 ready means reviewed implementation with relevant checks passed.
 
+Report presentation:
+- Include brief with verification and ready/blocked/failed: one outcome/usability sentence, blockers and actor-labelled next_steps within the tool's limits. Omit empty lists. Brief records a snapshot, not a human-attention request.
+- Keep check criteria short; put conditional passes in notes and gaps in unverified. Preserve paths, hashes, commands and chronology in summary/verification, which the panel folds without deleting.
+
 Verification:
 - Derive checks from the original request and explicit constraints, without expanding scope.
 - Include verification with ready and useful progress/blocked/failed results: a complete snapshot, not a patch. Give each criterion's passed/failed/not_run status, actual procedure and observed result (or why not run), and real evidence URLs when available; without links, record observations in method/notes. Never invent runs or evidence.

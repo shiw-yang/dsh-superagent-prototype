@@ -1,6 +1,6 @@
 /** Worker evidence flows through the real tool, Engine, SQLite and read surfaces without becoming independent acceptance. */
 import { afterEach, beforeEach, expect, it } from 'vitest'
-import { VerificationSchema } from '../src/app/tools/executor.ts'
+import { ReportBriefSchema, VerificationSchema } from '../src/app/tools/executor.ts'
 import { ticketDetail } from '../src/app/views/tickets.ts'
 import { Store } from '../src/app/store.ts'
 import { type Verification } from '../src/core/index.ts'
@@ -91,4 +91,63 @@ it('validates check states, nonempty methods and genuine HTTP(S) evidence links'
     expect(VerificationSchema.safeParse(value).success).toBe(false)
   }
   expect(VerificationSchema.parse({ checks: [{ criterion: 'x', status: 'not_run', method: 'No environment' }] })).not.toHaveProperty('revision')
+})
+
+it('persists a concise brief with its snapshot and latest report, and relays it without manufacturing attention', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('6', '@bot convert CSV'))
+  const brief = { conclusion: 'CSV generated but not usable yet', blockers: ['9 ratios rejected'], next_steps: ['User: choose how to handle 9 rows'] }
+  const storedBrief = { conclusion: brief.conclusion, blockers: brief.blockers, nextSteps: brief.next_steps }
+  const summary = 'Complete technical details: '.repeat(100)
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'blocked', summary, brief, verification: evidence() })
+  await h.runtime.idle()
+  const stored = h.runtime.store.tickets.get(ticket.id)!
+  expect(stored.attention).toBeUndefined()
+  expect(stored.assignments.at(-1)!.report).toMatchObject({ summary, brief: storedBrief })
+  expect(stored.verificationReports!.at(-1)).toMatchObject({ summary, brief: storedBrief })
+  const response = await h.api('GET', `tickets/${ticket.id}`)
+  expect(response.body.verificationReports).toEqual(stored.verificationReports)
+  expect(h.relays(h.runtime.masterId)).toContainEqual(expect.objectContaining({ kind: 'worker_report', brief: storedBrief }))
+  const page = await h.runTool(sessionId, 'orchestrator_read', { resource: `ticket/${ticket.id}/verification`, limit: 8000 }) as { text: string }
+  expect(JSON.parse(page.text).reports[0].brief).toEqual(storedBrief)
+  const { join } = await import('node:path')
+  const path = join(h.directory, 'brief.sqlite')
+  const db = new Store(path); db.tickets.save(stored); db.close()
+  const reopened = new Store(path)
+  try { expect(reopened.tickets.get(ticket.id)!.verificationReports!.at(-1)!.brief).toEqual(storedBrief) }
+  finally { reopened.close() }
+})
+
+it('does not reuse an earlier brief when a later report omits it', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('7', '@bot repair'))
+  const brief = { conclusion: 'Earlier result', next_steps: ['Worker: rerun checks'] }
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'Earlier details', brief, verification: evidence() })
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'New work without brief', verification: evidence('new') })
+  const stored = h.runtime.store.tickets.get(ticket.id)!
+  expect(stored.assignments.at(-1)!.report).not.toHaveProperty('brief')
+  expect(stored.verificationReports!.at(-1)).not.toHaveProperty('brief')
+  expect(stored.verificationReports![0]!.brief?.conclusion).toBe('Earlier result')
+})
+
+it.each([
+  { conclusion: '结'.repeat(81) },
+  { conclusion: 'Outcome', blockers: ['阻'.repeat(101)] },
+  { conclusion: 'Outcome', blockers: ['a', 'b', 'c', 'd'] },
+  { conclusion: 'Outcome', next_steps: ['步'.repeat(101)] },
+  { conclusion: 'Outcome', next_steps: ['a', 'b', 'c', 'd'] },
+  { conclusion: '   ' },
+])('keeps report and evidence when the presentation brief exceeds limits: %j', async brief => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('8', '@bot repair'))
+  const result = await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'Full details', brief, verification: evidence() })
+  expect(result).toMatchObject({ reported: true, brief_warning: expect.stringContaining('Report and evidence saved') })
+  const report = h.runtime.store.tickets.get(ticket.id)!.verificationReports![0]!
+  expect(report).not.toHaveProperty('brief')
+  expect(report.summary).toContain('Full details')
+  expect(report.summary).toContain(JSON.stringify(brief, null, 2))
+  expect(report.verification).toEqual(evidence())
+})
+
+it('accepts the brief limits exactly and trims surrounding whitespace', () => {
+  const brief = { conclusion: '结'.repeat(80), blockers: Array(3).fill('阻'.repeat(100)), next_steps: Array(3).fill('步'.repeat(100)) }
+  expect(ReportBriefSchema.parse(brief)).toEqual(brief)
+  expect(ReportBriefSchema.parse({ conclusion: ' done ', blockers: [], next_steps: [] })).toEqual({ conclusion: 'done', blockers: [], next_steps: [] })
 })

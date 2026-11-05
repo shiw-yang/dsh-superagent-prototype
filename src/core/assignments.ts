@@ -2,7 +2,7 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, liveTicket, runningAssignment } from './model.ts'
-import type { ReportState, Ticket, Verification } from './model.ts'
+import type { ReportBrief, ReportState, Ticket, Verification } from './model.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
 import { automatic, type Tickets } from './tickets.ts'
@@ -11,6 +11,7 @@ import { automatic, type Tickets } from './tickets.ts'
 export interface WorkerReport {
   state: ReportState
   summary: string
+  brief?: ReportBrief
   /** Optional for compatibility; omission preserves earlier verification snapshots without reusing them as new evidence. */
   verification?: Verification
   /** Open question for a person: a string asks it, `null` clears an open one, and `undefined` keeps the current one. */
@@ -121,10 +122,11 @@ export class Assignments extends EnginePart {
     else delete ticket.attention
     // A replaced or cleared attention question withdraws any pending unsent reply for the previous question from the outbox.
     if (previous && previous.id !== attention?.id) this.replies.withdrawAttention(previous.id)
-    assignment.report = { state: report.state, summary: report.summary, at }
+    const brief = report.brief ? { brief: structuredClone(report.brief) } : {}
+    assignment.report = { state: report.state, summary: report.summary, at, ...brief }
     if (report.verification) {
       ticket.verificationReports = [...ticket.verificationReports ?? [], {
-        assignmentId: assignment.id, at, state: report.state, summary: report.summary,
+        assignmentId: assignment.id, at, state: report.state, summary: report.summary, ...brief,
         verification: structuredClone(report.verification),
       }]
     }
