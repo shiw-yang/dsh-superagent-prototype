@@ -20,6 +20,22 @@ export interface ExecutorToolsHost {
   sendReplies(): Promise<void>
 }
 
+/** Structured worker testimony: link evidence without implying the host independently verified it. */
+export const VerificationSchema = z.object({
+  revision: z.string().trim().min(1).max(200).optional()
+    .describe('Tested SHA/artifact revision; omit if unknown.'),
+  checks: z.array(z.object({
+    criterion: z.string().trim().min(1).max(2000),
+    status: z.enum(['passed', 'failed', 'not_run']),
+    method: z.string().trim().min(1).max(4000).describe('Actual procedure and observed result, or why not run.'),
+    evidence: z.array(z.object({ label: z.string().trim().min(1).max(200),
+      url: z.string().url().max(4000).refine(value => /^https?:\/\//i.test(value), 'Evidence must use an HTTP(S) URL'),
+    }).strict()).max(20).optional(),
+    notes: z.string().trim().min(1).max(4000).optional(),
+  }).strict()).min(1).max(50),
+  unverified: z.array(z.string().trim().min(1).max(2000)).max(50).optional(),
+}).strict()
+
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
   const ticketId = ticket.id
   return [
@@ -77,6 +93,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       schema: z.object({
         state: z.enum(['progress', 'ready', 'blocked', 'failed', 'dropped']),
         summary: z.string().min(1),
+        verification: VerificationSchema.optional().describe('Worker-reported complete snapshot; see work section.'),
         human_action: z.string().trim().min(1).max(1000).nullish().describe('One concrete question for a person, also with state=progress; omit to keep the pending one, null to clear it.'),
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
         pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github.login} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
@@ -90,7 +107,8 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         return host.store.atomic(() => {
           const refused = pull && claimPull(host.github, ticketId, pull)
           if (refused) throw new Error(refused)
-          const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
+          const report = { state: args.state, summary: args.summary, ...(args.verification ? { verification: args.verification } : {}),
+            ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
           const updated = host.engine.report(ticketId, report)

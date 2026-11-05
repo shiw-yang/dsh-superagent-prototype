@@ -109,7 +109,8 @@ export function resultRelay(ticket: Ticket, state: string, text: string, replyTo
   const id = key('worker-result', ticket.id, ticket.updatedAt, text)
   const summary = text.length > 600 ? { summary: text.slice(0, 600), chars: text.length } : { summary: text }
   const report = { kind: 'worker_report', ticket: brief(ticket), trigger_id: ticket.origin.triggerId, state, ...replyTo ? { answer_to: replyTo } : {},
-    ...summary, read: `ticket/${ticket.id}/result` }
+    ...summary, read: `ticket/${ticket.id}/result`,
+    ...ticket.verificationReports?.length ? { verification: { reported_by: 'worker', read: `ticket/${ticket.id}/verification` } } : {} }
   return { id: `report:${id}`, text: JSON.stringify(report) }
 }
 /**

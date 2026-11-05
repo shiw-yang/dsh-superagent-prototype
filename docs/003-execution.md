@@ -91,6 +91,16 @@ The default instructions allow auto-merge only for a pull request opened for the
 
 Reviews without a body, such as approvals, also arrive as Triggers and can wake an Executor waiting for review. These instructions govern the agent, not GitHub's merge rules. To enforce approvals, require them in branch protection and dismiss stale approvals. Omit the merge CLI or remove the auto-merge paragraph to require manual merging.
 
+## Verification evidence
+
+Workers can include `verification` in `orchestrator_report`: a tested `revision`, `checks` (each with an acceptance `criterion`, `passed` / `failed` / `not_run` status, actual `method`, optional HTTP(S) `evidence` links and `notes`), and `unverified` limitations. The work prompt asks for this snapshot on readiness and when meaningful check results change. It guides repair and rechecking, not a new approval gate.
+
+Each supplied snapshot is appended to the Ticket with its Assignment, report state, summary and timestamp. A later report that omits verification does not erase or refresh older evidence. Existing Tickets and callers without verification remain supported; absence is never treated as a passed check. The SQLite Ticket record stores this optional history without a schema migration.
+
+The Ticket page shows the latest submitted verification and expandable history, including failed and unperformed checks, evidence links, limitations and the tested revision (or an explicit missing-version label). These are **worker-reported observations**, not host-verified CI or human acceptance. The host does not compare the reported revision with the current branch head. After changes the worker must submit a new snapshot; an earlier snapshot is not proof about newer code.
+
+The Router and owning Worker can read `ticket/<id>/verification` through `orchestrator_read`; it returns bounded text pages, newest snapshot first. Ticket details and result relays link to it without inlining the entire history.
+
 ## How a Ticket ends
 
 - **Ready without a pull request:** a `ready` Report ends the Ticket as completed.

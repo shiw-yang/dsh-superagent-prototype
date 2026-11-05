@@ -65,6 +65,67 @@ function Assignments({ ticket }: { ticket: TicketPageView }) {
       sessionId={item.ref} /></div>}
   </li>)}</ul>
 }
+type VerificationReport = NonNullable<TicketPageView['verificationReports']>[number]
+
+function evidenceUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : undefined
+  } catch { return undefined }
+}
+
+function VerificationSnapshot({ report }: { report: VerificationReport }) {
+  const { t } = usePanel()
+  const { verification } = report
+  return <>
+    <div className="dt-row-meta"><Tag tone="neutral">{t('verificationWorker')}</Tag>
+      <span>{t('assignmentReportShort', { state: valueLabel(t, 'report', report.state) })}</span></div>
+    <p>{report.summary}</p>
+    <KeyValues rows={[
+      [t('verificationRevision'), <span className="dt-mono">{verification.revision || t('verificationRevisionMissing')}</span>],
+      [t('verificationReportedAt'), <When at={report.at} />],
+      [t('verificationAssignment'), <span className="dt-mono">{report.assignmentId}</span>],
+    ]} />
+    {verification.checks.length ? <ul className="dt-list">{verification.checks.map((check, index) => <li key={index} className="dt-row">
+      <div className="dt-row-main">
+        <div className="dt-row-title"><Tag tone={check.status === 'passed' ? 'success' : check.status === 'failed' ? 'danger' : 'neutral'}>
+          {t(`verificationStatus.${check.status}`)}</Tag> {check.criterion}</div>
+        <KeyValues rows={[
+          [t('verificationMethod'), check.method],
+          ...(check.notes ? [[t('verificationNotes'), check.notes] as [string, ReactNode]] : []),
+          ...(check.evidence?.length ? [[t('verificationEvidence'), <ul className="dt-plain-list">{check.evidence.map((item, evidenceIndex) => {
+            const href = evidenceUrl(item.url)
+            return <li key={evidenceIndex}>{href ? <ExternalLink href={href}>{item.label}</ExternalLink> : <span>{item.label}</span>}</li>
+          })}</ul>] as [string, ReactNode]] : []),
+        ]} />
+      </div>
+    </li>)}</ul> : <Hint>{t('verificationChecksEmpty')}</Hint>}
+    <KeyValues rows={[[t('verificationLimitations'), verification.unverified?.length
+      ? <ul className="dt-plain-list">{verification.unverified.map((item, index) => <li key={index}>{item}</li>)}</ul>
+      : t('verificationLimitationsMissing')]]} />
+  </>
+}
+
+function VerificationReports({ reports = [] }: { reports?: VerificationReport[] }) {
+  const { t } = usePanel()
+  // Reports are snapshots, not a claim about the latest Assignment or the current HEAD.
+  // Backend append order is authoritative, even when timestamps tie or the clock moves backwards.
+  const [latest, ...earlier] = reports.slice().reverse()
+  return <Section title={t('verificationTitle')}>
+    {latest ? <>
+      <h3>{t('verificationLatest')}</h3>
+      <Hint>{t('verificationSnapshotNotice')}</Hint>
+      <VerificationSnapshot report={latest} />
+      {earlier.length > 0 && <Details icon="queue" title={t('verificationHistory', { count: earlier.length })}>
+        {earlier.map((report, index) => <Details key={`${report.assignmentId}:${report.at}:${index}`} icon="hash"
+          title={<>{report.verification.revision || t('verificationRevisionMissing')} · <When at={report.at} /></>}>
+          <VerificationSnapshot report={report} />
+        </Details>)}
+      </Details>}
+    </> : <Hint>{t('verificationEmpty')}</Hint>}
+  </Section>
+}
+
 function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: string }) {
   const { t, navigate } = usePanel()
   const { mandate, decision } = ticket
@@ -153,6 +214,7 @@ export function TicketPage({ id }: { id: string }) {
     {data.deliveryError && <p className="dt-banner dt-danger dt-mono">
       <span className="dt-banner-label">{t('deliveryFailedPrefix')}</span>{data.deliveryError}
     </p>}
+    <VerificationReports reports={data.verificationReports} />
     <MandateDetails ticket={data} actor={actor} />
     {undelivered.length > 0 && <Section title={t('undeliveredInputs')} count={undelivered.length}>
       <Hint>{data.deliveryError ? t('inputRetryHint') : data.paused ? t('inputPausedHint') : t('inputWaitingHint')}</Hint>
