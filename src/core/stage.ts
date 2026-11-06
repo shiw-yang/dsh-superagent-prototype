@@ -5,18 +5,21 @@ import { latestAssignment, waitsForPerson, type Ticket } from './model.ts'
 export type TicketStage = { stage: 'person'; action: 'delivery' | 'answer' | 'review' | 'blocked' | 'failed' }
   | { stage: 'working'; action?: 'queued' } | { stage: 'idle' } | { stage: 'ended' }
 
-/** Classifies a ticket's stage; the rules follow the table in docs/003 in order, where the first matching row wins. */
-export function ticketStage(ticket: Ticket): TicketStage {
+/**
+ * Classifies a ticket's stage using the ordered rules in docs/003. Panel callers supply current worker activity so a
+ * readiness or waiting report cannot hide an active turn or background work. Reports and the Ticket lifecycle stay intact.
+ */
+export function ticketStage(ticket: Ticket, working = false): TicketStage {
   if (ticket.ended) return { stage: 'ended' }
   if (ticket.delivery) return { stage: 'person', action: 'delivery' }
   if (ticket.attention) return { stage: 'person', action: 'answer' }
   const assignment = latestAssignment(ticket)
   const report = assignment?.report?.state
-  if (report === 'ready') return { stage: 'person', action: 'review' }
+  if (report === 'ready' && !working) return { stage: 'person', action: 'review' }
   // A human follow-up after a blocked or failed report returns the ticket to the executor.
   if ((report === 'blocked' || report === 'failed') && waitsForPerson(ticket)) return { stage: 'person', action: report }
   if (!assignment || assignment.state === 'pending') return { stage: 'working', action: 'queued' }
-  if (report === 'waiting' || assignment.state === 'ended') return { stage: 'idle' }
+  if ((report === 'waiting' && !working) || assignment.state === 'ended') return { stage: 'idle' }
   return { stage: 'working' }
 }
 

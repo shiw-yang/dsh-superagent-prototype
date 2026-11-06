@@ -172,7 +172,7 @@ export class WorkerSlots {
   /** Tickets currently holding a startup slot, mapped to whether the start is a launch, a wake, or a wake for a person's message. */
   private readonly starting = new Map<string, 'launch' | 'wake' | 'person'>()
   /**
-   * @param running - Returns the ticket IDs whose worker holds a slot (see `DshExecutor.running`).
+   * @param running - Returns the ticket IDs whose worker holds a slot (see `DshExecutor.working`).
    * @param max - Returns the configured maximum number of concurrent worker slots.
    */
   constructor(private readonly running: () => string[], private readonly max: () => number) {}
@@ -226,7 +226,7 @@ export class DshExecutor implements Executor {
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
-    this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
+    this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.working(ticket)).map(ticket => ticket.id),
       () => host.store.settings().executor.maxWorkers)
     // Each launch reserves a worker slot so launches run concurrently while slots are free.
     host.effects.handle('launch', payload => this.launchQueued(payload), { limit: () => host.paused() ? 0 : this.slots.launches(),
@@ -302,7 +302,7 @@ export class DshExecutor implements Executor {
         if (!ticket || !assignment || inputId === undefined) return
         // Waking an idle worker reserves a slot (including the extra slot reserved for human follow-ups).
         const sessionId = workerSessionId(ticketId)
-        if (!woken && !this.running(ticket)) {
+        if (!woken && !this.working(ticket)) {
           // A person's message wakes its worker ahead of new launches, in the slot kept for it.
           const person = ticket.undelivered.some(id => fromPerson(ticket.inputs.find(item => item.id === id)))
           this.slots.reserve(ticketId, person ? 'person' : 'wake')
@@ -401,9 +401,9 @@ export class DshExecutor implements Executor {
     await until(stop(), undefined, SHUTDOWN_STOP_MS)
   }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
-  activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length }
+  activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.working(ticket)).length }
   /** Whether a ticket's worker holds a worker slot: its turn runs, or its shell jobs or subagents do after its turn ended. */
-  private running(ticket: Ticket): boolean {
+  working(ticket: Ticket): boolean {
     if (!runningAssignment(ticket)) return false
     return this.host.context.agents.get(workerSessionId(ticket.id) as SessionId)?.status === 'running' || this.settling.has(ticket.id)
   }
@@ -563,7 +563,7 @@ export class DshExecutor implements Executor {
       // Wait while processing is paused or no wake slot is free.
       if (this.host.paused()) { this.after(SLOT_WAIT_MS, go); return }
       const sessionId = workerSessionId(ticketId)
-      const waking = !this.running(ticket)
+      const waking = !this.working(ticket)
       try { if (waking) this.slots.reserve(ticketId, 'wake') } catch (failure) {
         if (!(failure instanceof Later)) throw failure
         this.after(SLOT_WAIT_MS, go); return

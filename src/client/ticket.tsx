@@ -47,11 +47,12 @@ function Assignments({ ticket }: { ticket: TicketPageView }) {
   const { t } = usePanel()
   const report = (state: string) => t('assignmentReportShort', { state: valueLabel(t, 'report', state) })
   return <ul className="dt-list">{ticket.assignments.slice().reverse().map((item, index) => <li key={item.id} className="dt-row">
-    <Dot state={item.state === 'running' ? reportDot(item.report?.state) : 'idle'} label={valueLabel(t, 'assignment', item.state)} />
+    <Dot state={item.state === 'running' ? item.turnEndedAt ? reportDot(item.report?.state) : 'ongoing' : 'idle'}
+      label={valueLabel(t, 'assignment', item.state)} />
     <div className="dt-row-main">
       <div className="dt-row-title">{t('assignmentNumber', { number: ticket.assignments.length - index })}</div>
       <div className="dt-row-meta">
-        {/* A running Assignment whose worker reported a non-progress state has ended its turn; show that report as its tag and end its span there. */}
+        {/* The host combines the report with live activity; only a settled turn shows the report as its tag and span end. */}
         {item.turnEndedAt && item.report ? <Tag tone="neutral">{report(item.report.state)}</Tag> : <Tag tone={item.state === 'running'
           ? 'info'
           : 'neutral'}>{valueLabel(t, 'assignment', item.state)}</Tag>}
