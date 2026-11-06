@@ -35,7 +35,7 @@ export function basisFacts(basis: MandateBasis, rule: Snapshot['rule']): { facts
 export function ticketList(host: ViewHost, stage: 'open' | TicketStage['stage'], offset: number, limit: number) {
   const view = snapshot(host)
   const { store } = view
-  const shown = (ticket: Ticket) => stage === 'open' ? liveTicket(ticket) : ticketStage(ticket).stage === stage
+  const shown = (ticket: Ticket) => stage === 'open' ? liveTicket(ticket) : ticketStage(ticket, view.working?.(ticket)).stage === stage
   const tickets = (stage === 'ended' ? store.tickets.list() : store.tickets.open()).filter(shown).sort(newestFirst)
   const result = page(tickets, offset, limit)
   return { ...result, items: result.items.map(ticket => ticketRow(view, ticket)) }
@@ -58,7 +58,8 @@ export function ticketDetail(host: ViewHost, id: string) {
   const ticket = store.tickets.get(id)
   if (!ticket) return undefined
   const view = snapshot(host)
-  const { stage } = ticketStage(ticket)
+  const working = view.working?.(ticket) ?? false
+  const { stage } = ticketStage(ticket, working)
   const decision = store.decisions.get(ticket.decisionId)
   const input = (value: Ticket['inputs'][number]) => {
     const trigger = value.kind === 'trigger' ? store.triggers.get(value.triggerId) : undefined
@@ -76,9 +77,9 @@ export function ticketDetail(host: ViewHost, id: string) {
     ...ticket.verificationReports ? { verificationReports: ticket.verificationReports } : {},
     channels: ticket.channels.map(channel => channelLink(view, channel)),
     decision: decision ? decisionView(view, decision) : undefined,
-    // Every started Assignment ran in the ticket's one worker Session. A running assignment whose worker reported a non-progress state has finished its turn unless a human response resumed the ticket.
+    // A non-progress report is no turn end while the worker or its slot-holding background work is still active.
     assignments: ticket.assignments.map(assignment => ({ ...assignment, ...assignment.startedAt ? { ref: workerSessionId(ticket.id) } : {},
-      ...assignment.state === 'running' && assignment.report && assignment.report.state !== 'progress' && stage !== 'working'
+      ...assignment.state === 'running' && assignment.report && assignment.report.state !== 'progress' && !working && stage !== 'working'
         ? { turnEndedAt: assignment.report.at } : {} })),
     inputs: ticket.inputs.slice().reverse().map(input),
     // Threads followed for context only (e.g., related issues) grant no authority and are marked with `context: true`.

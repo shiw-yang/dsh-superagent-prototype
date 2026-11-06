@@ -10,13 +10,15 @@ Each open Ticket has one stage, determined by what it is waiting for. Read the t
 | --- | --- | --- |
 | person / delivery | Delivering an Input to the Executor Session failed; it is retried after 2 seconds, then after a delay that doubles up to a minute, and a success, a new Assignment or the Ticket's end clears it | Input undelivered |
 | person / answer | It has an Attention | Awaiting answer |
-| person / review | The latest Report is `ready` | Awaiting review |
+| person / review | The latest Report is `ready`, and the worker is not currently working | Awaiting review |
 | person / blocked, failed | The latest Report is `blocked` or `failed`, and no person's message reached the Ticket since | Blocked · Failed |
 | working / queued | No Assignment, or a pending one | Queued |
-| idle | The latest Report is `waiting`, or the Assignment ended | Waiting for a Trigger |
+| idle | The latest Report is `waiting` and the worker is not currently working, or the Assignment ended | Waiting for a Trigger |
 | working | Everything else | Working |
 
-A `person` stage means the Ticket cannot continue without human input. A new human message releases a `blocked` or `failed` Ticket to its Executor, so it moves to the next matching stage, usually `working`.
+The panel combines stored Reports with the Executor's current activity: an active turn or background work holding a worker slot takes precedence over `ready` and `waiting`. This applies to the overview, lists and filters, details, Thread tickets and search. It covers follow-up messages, CI notices and turns started directly in the Session, without waiting for another Report. A preview server left running after handoff holds no slot and does not make the Ticket working. This is a presentation rule only: it does not rewrite Reports, verification history, or the Ticket's open/ended lifecycle; model-facing cards without live activity retain their report-based state.
+
+A `person` stage means the Ticket needs human input. Delivery failures, an open Attention, and a `blocked` or `failed` Report that still waits for a person retain priority even while a turn is active. A new human message releases a `blocked` or `failed` Ticket to its Executor, so it moves to the next matching stage, usually `working`.
 
 A new message from a person that reaches the Ticket, by fan-out on one of its own Threads or by attachment, clears an open Attention: the person answered the question or superseded it, so the Ticket leaves `person / answer`, and an unsent question is withdrawn. A bot's or CI's message, and one read on a Thread the Ticket follows only for context, is no answer.
 

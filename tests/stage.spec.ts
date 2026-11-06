@@ -34,6 +34,24 @@ describe('ticketStage', () => {
   ])('%s', (_name, value, stage) => { expect(ticketStage(value)).toEqual(stage) })
 })
 
+describe('ticketStage with current worker activity', () => {
+  it.each(['ready', 'waiting'] as const)('does not let a %s report hide active work', state => {
+    expect(ticketStage(ticket({ assignments: [reported(state)] }), true)).toEqual({ stage: 'working' })
+  })
+  it.each([
+    ['an ended ticket', ticket({ ended }), { stage: 'ended' }],
+    ['a delivery failure', ticket({ delivery: { error: 'offline', at: '' } }), { stage: 'person', action: 'delivery' }],
+    ['an open question', ticket({ attention }), { stage: 'person', action: 'answer' }],
+    ['a blocked report', ticket({ assignments: [reported('blocked')] }), { stage: 'person', action: 'blocked' }],
+    ['a failed report', ticket({ assignments: [reported('failed')] }), { stage: 'person', action: 'failed' }],
+    ['no assignment', ticket({ assignments: [] }), { stage: 'working', action: 'queued' }],
+    ['a pending assignment', ticket({ assignments: [assignment({ state: 'pending' })] }), { stage: 'working', action: 'queued' }],
+    ['an ended assignment', ticket({ assignments: [assignment({ state: 'ended' })] }), { stage: 'idle' }],
+  ])('preserves the priority of %s', (_name, value, stage) => {
+    expect(ticketStage(value, true)).toEqual(stage)
+  })
+})
+
 describe('canRetry', () => {
   it.each([
     ['a failed open Ticket', true, ticket({ assignments: [reported('failed')] })],
